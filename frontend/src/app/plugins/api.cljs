@@ -27,7 +27,9 @@
    [app.main.data.workspace.colors :as dwc]
    [app.main.data.workspace.groups :as dwg]
    [app.main.data.workspace.media :as dwm]
+   [app.main.data.workspace.modifiers :as dwmm]
    [app.main.data.workspace.selection :as dws]
+   [app.main.data.workspace.shape-layout :as dwsl]
    [app.main.data.workspace.variants :as dwv]
    [app.main.data.workspace.wasm-text :as dwwt]
    [app.main.features :as features]
@@ -54,7 +56,8 @@
    [app.util.object :as obj]
    [app.util.theme :as theme]
    [beicon.v2.core :as rx]
-   [cuerdas.core :as str]))
+   [cuerdas.core :as str]
+   [potok.v2.core :as ptk]))
 
 ;;
 ;; PLUGINS PUBLIC API - The plugins will able to access this functions
@@ -669,4 +672,41 @@
                          {:trigger "plugin:combine-as-variants" :variant-id variant-id}))
               (shape/shape-proxy plugin-id variant-id))
 
-            (u/not-valid plugin-id :shapes "One of the components is not on the same page or is already a variant")))))))
+            (u/not-valid plugin-id :shapes "One of the components is not on the same page or is already a variant")))))
+
+    :waitForLayoutUpdate
+    (fn [timeout]
+      (js/Promise.
+       (fn [resolve reject]
+         (->> (rx/merge
+               (if timeout
+                 (->> (rx/of :timeout)
+                      (rx/delay timeout))
+                 (rx/empty))
+
+               ;; Estas dos operaciones seria "take last" y luego tambien esta que
+               ;; hay que ver lo de la fuente.
+               (if @dwsl/layout-pending
+                 (->> st/stream
+                      (rx/filter (ptk/type? ::dwsl/update-layout-positions))
+                      (rx/take 1))
+                 (rx/empty))
+
+               (if @dwwt/resize-pending
+                 (->> st/stream
+                      (rx/filter (ptk/type? ::dwmm/apply-wasm-modifiers))
+                      (rx/take 1))
+                 (rx/empty))
+
+               (if (and (not @dwwt/resize-pending)
+                        (not @dwsl/layout-pending))
+                 (rx/of :ok)
+                 (rx/empty)))
+              (rx/take 1)
+              (rx/subs!
+               (fn [value]
+                 (if (= value :timeout)
+                   ;; If timeout we reject
+                   (reject)
+                   (resolve)))
+               reject)))))))
