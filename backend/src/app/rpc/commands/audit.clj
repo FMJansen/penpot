@@ -91,6 +91,51 @@
 
     (sequence xform events)))
 
+;; Context keys from the frontend that are safe to retain for telemetry:
+;; they describe the browser/OS environment but cannot identify a user.
+;; Session-linking keys (session, external-session-id) and file-specific
+;; stats (file-stats) are intentionally excluded.
+(def ^:private safe-context-keys
+  #{:version
+    :locale
+    :browser
+    :browser-version
+    :engine
+    :engine-version
+    :os
+    :os-version
+    :device-type
+    :device-arch
+    :screen-width
+    :screen-height
+    :screen-color-depth
+    :screen-orientation
+    :event-origin
+    :event-namespace
+    :event-symbol})
+
+(defn- filter-safe-context
+  "Return only the anonymous, non-identifying context fields from an
+  event context map.  Any key not in `safe-context-keys` is dropped."
+  [ctx]
+  (select-keys ctx safe-context-keys))
+
+(def ^:private xf:map-telemetry-event-row
+  (comp
+   (map adjust-timestamp)
+   (map (fn [event]
+          (let [tday (ct/truncate (::audit/created-at event) :days)]
+            [(::audit/id event)
+             (::audit/name event)
+             "telemetry"
+             (::audit/type event)
+             tday
+             tday
+             (::audit/profile-id event)
+             (db/inet "0.0.0.0")
+             (db/tjson {})
+             (db/tjson (filter-safe-context (::audit/context event {})))])))))
+
 (defn- handle-events
   [{:keys [::db/pool] :as cfg} params]
   (let [events (get-events params)]
@@ -102,10 +147,18 @@
       (run! (partial loggers.db/emit cfg) events)
       (run! (partial loggers.mm/emit cfg) events))
 
-    ;; Process and save events
-    (when (seq events)
-      (let [rows (sequence xf:map-event-row events)]
-        (db/insert-many! pool :audit-log event-columns rows)))))
+    (if (contains? cf/flags :audit-log)
+      ;; Process and save full audit events when audit-log flag is active
+      (when-let [rows (-> (sequence xf:map-event-row events)
+                          (not-empty))]
+        (db/insert-many! pool :audit-log event-columns rows))
+
+      ;; When telemetry is enabled (and audit-log is NOT), store anonymized
+      ;; frontend events so the telemetry task can ship them in batches.
+      (when cf/telemetry-enabled?
+        (when-let [rows (-> (sequence xf:map-telemetry-event-row events)
+                            (not-empty))]
+          (db/insert-many! pool :audit-log event-columns rows))))))
 
 (def ^:private valid-event-types
   #{"action" "identify" "trigger"})
@@ -138,17 +191,20 @@
    ::doc/skip true
    ::doc/added "1.17"}
   [{:keys [::db/pool] :as cfg} params]
-  (if (or (db/read-only? pool)
-          (not (contains? cf/flags :audit-log)))
-    (do
-      (l/warn :hint "audit: http handler disabled or db is read-only")
-      (rph/wrap nil))
+  (let [telemetry? cf/telemetry-enabled?
+        audit-log? (contains? cf/flags :audit-log)
+        enabled?   (and (not (db/read-only? pool))
+                        (or audit-log? telemetry?))]
+    (if-not enabled?
+      (do
+        (l/warn :hint "audit: http handler disabled or db is read-only")
+        (rph/wrap nil))
 
-    (do
-      (try
-        (handle-events cfg params)
-        (catch Throwable cause
-          (l/error :hint "unexpected error on persisting audit events from frontend"
-                   :cause cause)))
+      (do
+        (try
+          (handle-events cfg params)
+          (catch Throwable cause
+            (l/error :hint "unexpected error on persisting audit events from frontend"
+                     :cause cause)))
 
-      (rph/wrap nil))))
+        (rph/wrap nil)))))

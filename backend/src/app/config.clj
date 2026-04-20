@@ -331,6 +331,12 @@
   (or (c/get config :file-clean-delay)
       (ct/duration {:days 2})))
 
+(def telemetry-enabled?
+  "True when telemetry is active, either via the :telemetry feature
+  flag or the legacy :telemetry-enabled config key."
+  (or (contains? flags :telemetry)
+      (c/get config :telemetry-enabled)))
+
 (defn get
   "A configuration getter. Helps code be more testable."
   ([key]
