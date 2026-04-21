@@ -2336,31 +2336,17 @@ impl RenderState {
 
         let sampling = self.sampling_options;
         let blit_paint = skia::Paint::default();
+        // Drop the `canvas` borrow here; `compose_node` reacquires it
+        // internally. skia's Canvas is a pointer into the surface so
+        // reacquiring does not reset save/restore state — the matrix
+        // and clears established above survive across calls.
+        drop(canvas);
+
         for id in &top_level_ids {
-            let Some(entry) = self.shape_cache.get(id) else {
-                continue;
-            };
-            let Some(shape) = tree.get(id) else { continue };
-            if shape.hidden() {
-                continue;
-            }
-
-            let modifier = tree.modifier_of(id);
-
-            canvas.save();
-            if let Some(m) = modifier {
-                canvas.concat(&m);
-            }
-            canvas.draw_image_rect_with_sampling_options(
-                &entry.image,
-                None,
-                entry.source_doc_rect,
-                sampling,
-                &blit_paint,
-            );
-            canvas.restore();
+            self.compose_node(id, &*tree, sampling, &blit_paint);
         }
 
+        let canvas = self.surfaces.canvas(SurfaceId::Target);
         canvas.restore();
         self.flush_and_submit();
 
@@ -2386,6 +2372,57 @@ impl RenderState {
         wapi::notify_tiles_render_complete!();
 
         Ok(())
+    }
+
+    /// Recursive compositor for the retained-mode path.
+    ///
+    /// Scaffolding commit: behaviour is identical to the previous
+    /// per-top-level blit loop. If `id` has a fresh entry in
+    /// `shape_cache` its texture is drawn on `SurfaceId::Target` with
+    /// the current modifier matrix applied on top; otherwise nothing
+    /// is drawn (the capture phase in `render_retained` is responsible
+    /// for populating the cache for anything that was missing).
+    ///
+    /// The signature takes `&*tree` so callers can pass a reborrowed
+    /// `ShapesPoolRef` while holding the outer `ShapesPoolMutRef`
+    /// alive. The `compose_node` name and its recursive-friendly shape
+    /// are deliberate: the next commit will teach it to descend into
+    /// `shape.children_ids_iter_forward(true)` on cache miss for
+    /// cacheable groups, reusing child textures to avoid rasterizing
+    /// whole subtrees on local edits.
+    fn compose_node(
+        &mut self,
+        id: &Uuid,
+        tree: ShapesPoolRef,
+        sampling: skia::SamplingOptions,
+        blit_paint: &skia::Paint,
+    ) {
+        // Pull everything we need out of `&self` before acquiring the
+        // canvas — `self.surfaces.canvas()` wants `&mut self` and would
+        // otherwise conflict with `self.shape_cache.get()`.
+        let (image, source_doc_rect) = match self.shape_cache.get(id) {
+            Some(entry) => (entry.image.clone(), entry.source_doc_rect),
+            None => return,
+        };
+        let Some(shape) = tree.get(id) else { return };
+        if shape.hidden() {
+            return;
+        }
+        let modifier = tree.modifier_of(id);
+
+        let canvas = self.surfaces.canvas(SurfaceId::Target);
+        canvas.save();
+        if let Some(m) = modifier {
+            canvas.concat(&m);
+        }
+        canvas.draw_image_rect_with_sampling_options(
+            &image,
+            None,
+            source_doc_rect,
+            sampling,
+            blit_paint,
+        );
+        canvas.restore();
     }
 
     #[inline]
