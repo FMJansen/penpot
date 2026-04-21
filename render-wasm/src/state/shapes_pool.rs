@@ -53,6 +53,20 @@ pub struct ShapesPoolImpl {
     structure: HashMap<usize, Vec<StructureEntry>>,
     /// Scale content values, keyed by index
     scale_content: HashMap<usize, f32>,
+
+    /// Monotonically increasing version number per shape index.
+    ///
+    /// Bumped every time a shape is accessed mutably via `get_mut`, and
+    /// the increment is propagated up the parent chain so the
+    /// retained-mode renderer can detect "this shape or any of its
+    /// descendants changed" by comparing the version of a top-level
+    /// ancestor against the version cached when its texture was
+    /// captured.
+    ///
+    /// Modifiers are intentionally *not* tracked here: they are applied
+    /// as a canvas transform by the retained compositor and must not
+    /// invalidate the cached texture.
+    shape_versions: Vec<u64>,
 }
 
 // Type aliases - no longer need lifetimes!
@@ -71,6 +85,7 @@ impl ShapesPoolImpl {
             modifiers: HashMap::default(),
             structure: HashMap::default(),
             scale_content: HashMap::default(),
+            shape_versions: vec![],
         }
     }
 
@@ -91,6 +106,7 @@ impl ShapesPoolImpl {
 
         self.shapes
             .extend(iter::repeat_with(|| Shape::new(Uuid::nil())).take(additional as usize));
+        self.shape_versions.resize(self.shapes.len(), 0);
         performance::end_measure!("shapes_pool_initialize");
     }
 
@@ -113,6 +129,9 @@ impl ShapesPoolImpl {
             self.shapes
                 .extend(iter::repeat_with(|| Shape::new(Uuid::nil())).take(additional));
         }
+        if self.shape_versions.len() < self.shapes.len() {
+            self.shape_versions.resize(self.shapes.len(), 0);
+        }
 
         let idx = self.counter;
         let new_shape = &mut self.shapes[idx];
@@ -121,6 +140,12 @@ impl ShapesPoolImpl {
         // Simply store the UUID -> index mapping. No unsafe lifetime tricks needed!
         self.uuid_to_idx.insert(id, idx);
         self.counter += 1;
+
+        // Bump version so a late retained-mode render doesn't serve a
+        // stale texture from a shape uuid that has been reused.
+        if let Some(v) = self.shape_versions.get_mut(idx) {
+            *v = v.wrapping_add(1);
+        }
 
         &mut self.shapes[idx]
     }
@@ -137,7 +162,84 @@ impl ShapesPoolImpl {
 
     pub fn get_mut(&mut self, id: &Uuid) -> Option<&mut Shape> {
         let idx = *self.uuid_to_idx.get(id)?;
+        self.bump_version_with_ancestors(idx);
         Some(&mut self.shapes[idx])
+    }
+
+    /// Increment the version counter of `idx` and walk up its parent
+    /// chain bumping each ancestor as well. The retained-mode cache
+    /// stores textures per top-level shape (direct child of the root);
+    /// propagating lets a deep mutation correctly invalidate whichever
+    /// ancestor owns the cached subtree.
+    fn bump_version_with_ancestors(&mut self, idx: usize) {
+        if let Some(v) = self.shape_versions.get_mut(idx) {
+            *v = v.wrapping_add(1);
+        }
+
+        // The root (Uuid::nil) has no parent; walking stops naturally
+        // via `parent_id == None`.
+        let mut current_idx = idx;
+        loop {
+            let parent_id = match self.shapes.get(current_idx).and_then(|s| s.parent_id) {
+                Some(pid) => pid,
+                None => break,
+            };
+            let Some(parent_idx) = self.uuid_to_idx.get(&parent_id).copied() else {
+                break;
+            };
+            if parent_idx == current_idx {
+                // Defensive: a self-parent would loop forever.
+                break;
+            }
+            if let Some(v) = self.shape_versions.get_mut(parent_idx) {
+                *v = v.wrapping_add(1);
+            }
+            current_idx = parent_idx;
+        }
+    }
+
+    /// Current version of a shape. Used by the retained-mode texture
+    /// cache to detect invalidated entries: captured_version != current
+    /// ⇒ re-rasterize.
+    ///
+    /// Returns `None` for uuids that are not (or no longer) registered
+    /// in the pool.
+    pub fn shape_version(&self, id: &Uuid) -> Option<u64> {
+        let idx = *self.uuid_to_idx.get(id)?;
+        self.shape_versions.get(idx).copied()
+    }
+
+    /// Raw transform modifier associated with `id`, without applying
+    /// it to the shape. The retained-mode compositor uses this to
+    /// concatenate the modifier onto the canvas before blitting the
+    /// cached texture, so the workspace behaves like the SVG renderer
+    /// (texture stays put, layer transform moves).
+    pub fn modifier_of(&self, id: &Uuid) -> Option<skia::Matrix> {
+        let idx = *self.uuid_to_idx.get(id)?;
+        self.modifiers.get(&idx).copied()
+    }
+
+    /// Removes every active modifier and returns them keyed by Uuid,
+    /// ready to be handed back to `set_modifiers`. Used by the
+    /// retained-mode capture step to ensure the snapshot is taken at
+    /// the shape's base position — modifiers are re-applied later as
+    /// canvas transforms, so capturing with them applied would
+    /// double-transform the shape.
+    pub fn take_modifiers(&mut self) -> HashMap<Uuid, skia::Matrix> {
+        if self.modifiers.is_empty() {
+            return HashMap::new();
+        }
+        let mut out = HashMap::with_capacity(self.modifiers.len());
+        for (idx, matrix) in self.modifiers.drain() {
+            if let Some(shape) = self.shapes.get(idx) {
+                out.insert(shape.id, matrix);
+            }
+        }
+        // Modified-shape cache entries baked in the taken modifiers
+        // become stale; drop them so subsequent `get()` calls return
+        // the un-transformed shape.
+        self.modified_shape_cache.clear();
+        out
     }
 
     /// Get a shape by UUID. Returns the modified shape if modifiers/structure
@@ -327,6 +429,7 @@ impl ShapesPoolImpl {
             new_idx += 1;
         }
 
+        let shape_versions = vec![0; shapes.len()];
         ShapesPoolImpl {
             shapes,
             counter: new_idx,
@@ -335,6 +438,7 @@ impl ShapesPoolImpl {
             modifiers: HashMap::default(),
             structure: HashMap::default(),
             scale_content: HashMap::default(),
+            shape_versions,
         }
     }
 
