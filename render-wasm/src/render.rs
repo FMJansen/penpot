@@ -2162,8 +2162,93 @@ impl RenderState {
             None => return Ok(()),
         };
 
-        // Evict entries whose shape disappeared from the pool.
-        let live: HashSet<Uuid> = top_level_ids.iter().copied().collect();
+        // While a pan/zoom gesture is in flight we deliberately avoid
+        // re-capturing on scale changes: skia will resample the
+        // existing textures during compose (slightly softer for a
+        // few frames) and we reserve the cost of a fresh capture for
+        // after the gesture settles — same strategy the tile
+        // pipeline uses with its cache surface.
+        let allow_scale_drift = self.options.is_fast_mode();
+
+        // The viewport (in document space, including a modest margin)
+        // is used to viewport-cull nested containers: we don't want to
+        // eagerly rasterize every Board in a large file, only those
+        // actually visible. Top-level shapes bypass this filter —
+        // they're the primary unit composed every frame and keeping
+        // their caches warm avoids a thundering re-capture as the
+        // user pans.
+        let viewport_doc = self.viewbox.area;
+        let viewport_with_margin = {
+            let mut r = viewport_doc;
+            if !r.is_empty() {
+                let margin = (r.width().max(r.height()) * 0.25).max(1.0);
+                r.outset((margin, margin));
+            }
+            r
+        };
+
+        // Collect the full list of shapes whose subtree snapshot is
+        // worth persisting in `shape_cache`. We include:
+        //   • every direct child of the root (top-level layers);
+        //   • every recursive container (Frame/Group/Bool) anywhere
+        //     in the tree that is visible in the current viewport.
+        //
+        // Order is post-order (deepest first). Iterating captures in
+        // this order means that when the walker hits an outer
+        // container's capture it already finds fresh cache entries
+        // for any nested containers inside it — the intercept in
+        // `render_shape_tree_partial_uncached` then short-circuits
+        // those subtrees to a single blit instead of rasterizing them
+        // again. That's the bulk of the retained-mode win: edits
+        // local to one Board don't pay rasterization cost for sibling
+        // Boards that never changed.
+        let all_cacheable_ids: Vec<Uuid> = {
+            let pool: ShapesPoolRef = &*tree;
+            let mut out: Vec<Uuid> = Vec::new();
+            fn walk<'a>(
+                pool: ShapesPoolRef<'a>,
+                id: &Uuid,
+                is_top: bool,
+                viewport: Rect,
+                scale: f32,
+                out: &mut Vec<Uuid>,
+            ) {
+                let Some(shape) = pool.get(id) else { return };
+                // Hidden branches never reach the render pipeline,
+                // so caching them would only waste GPU memory.
+                if shape.hidden() {
+                    return;
+                }
+                if shape.is_recursive() {
+                    for child_id in shape.children_ids_iter_forward(true) {
+                        walk(pool, child_id, false, viewport, scale, out);
+                    }
+                }
+                let is_container = shape.is_recursive();
+                let cacheable = is_top || is_container;
+                if !cacheable {
+                    return;
+                }
+                if !is_top && !viewport.is_empty() {
+                    let mut r = shape.extrect(pool, scale);
+                    if !r.intersect(viewport) {
+                        return;
+                    }
+                }
+                out.push(*id);
+            }
+            for id in &top_level_ids {
+                walk(pool, id, true, viewport_with_margin, scale, &mut out);
+            }
+            out
+        };
+
+        // Evict entries whose shape is no longer cacheable (either
+        // dropped from the pool or scrolled well outside the
+        // viewport). Keeping them wouldn't hurt correctness — the
+        // walker only uses fresh entries — but memory for GPU
+        // textures we'll likely never hit again isn't free.
+        let live: HashSet<Uuid> = all_cacheable_ids.iter().copied().collect();
         let stale: Vec<Uuid> = self
             .shape_cache
             .iter_ids()
@@ -2173,19 +2258,12 @@ impl RenderState {
             self.shape_cache.remove(&id);
         }
 
-        // While a pan/zoom gesture is in flight we deliberately avoid
-        // re-capturing on scale changes: skia will resample the
-        // existing textures during compose (slightly softer for a
-        // few frames) and we reserve the cost of a fresh capture for
-        // after the gesture settles — same strategy the tile
-        // pipeline uses with its cache surface.
-        let allow_scale_drift = self.options.is_fast_mode();
-
-        // Classify each top-level shape into "cacheable" (fits the
-        // GPU texture budget at workspace scale, so the capture is
+        // Classify each cacheable id into "cacheable" (fits the GPU
+        // texture budget at workspace scale, so the capture is
         // pixel-accurate and worth persisting) vs "ephemeral" (would
         // trigger the scale clamp — we capture just the visible
-        // viewport slice at full resolution and discard afterwards).
+        // viewport slice at full resolution and discard afterwards,
+        // top-level only for simplicity).
         //
         // We compare against the per-shape *effective* capture scale
         // (which may be clamped at extreme zoom to fit the GPU
@@ -2194,6 +2272,13 @@ impl RenderState {
         // returns a clamped scale < workspace scale, `is_fresh` then
         // sees a scale mismatch, we recapture and get the same clamp,
         // ad infinitum.
+        //
+        // For nested containers that would be clamped we simply don't
+        // cache them — the walker falls back to rendering them inline
+        // inside the ancestor's capture, which costs exactly what it
+        // would have cost before this commit. Ephemeral-for-nested is
+        // a future optimisation.
+        let top_level_set: HashSet<Uuid> = top_level_ids.iter().copied().collect();
         let (cacheable_to_capture, ephemeral_to_capture): (Vec<(Uuid, u64)>, Vec<(Uuid, u64)>) = {
             // Reborrow `tree` as an immutable view so we can call
             // `extrect` (which takes `ShapesPoolRef`) without fighting
@@ -2201,8 +2286,9 @@ impl RenderState {
             let pool: ShapesPoolRef = &*tree;
             let mut cacheable = Vec::new();
             let mut ephemeral = Vec::new();
-            for id in &top_level_ids {
+            for id in &all_cacheable_ids {
                 let v = pool.shape_version(id).unwrap_or(0);
+                let is_top = top_level_set.contains(id);
                 let (effective_scale, is_clamped) = match pool.get(id) {
                     Some(shape) => {
                         let eff = self.effective_capture_scale(shape.extrect(pool, scale), scale);
@@ -2216,11 +2302,11 @@ impl RenderState {
                 };
                 if is_clamped {
                     // Ephemeral path only runs outside of interactive
-                    // gestures: during pan/zoom/drag we let the old
-                    // (possibly stale) cache entry stretch so the
-                    // gesture stays responsive, and we re-capture on
-                    // release.
-                    if !allow_scale_drift {
+                    // gestures and only for top-level shapes: during
+                    // pan/zoom/drag we let the old (possibly stale)
+                    // cache entry stretch so the gesture stays
+                    // responsive, and we re-capture on release.
+                    if is_top && !allow_scale_drift {
                         ephemeral.push((*id, v));
                     }
                 } else if !self
@@ -2374,22 +2460,20 @@ impl RenderState {
         Ok(())
     }
 
-    /// Recursive compositor for the retained-mode path.
+    /// Top-level blit compositor for the retained-mode path.
     ///
-    /// Scaffolding commit: behaviour is identical to the previous
-    /// per-top-level blit loop. If `id` has a fresh entry in
-    /// `shape_cache` its texture is drawn on `SurfaceId::Target` with
-    /// the current modifier matrix applied on top; otherwise nothing
-    /// is drawn (the capture phase in `render_retained` is responsible
-    /// for populating the cache for anything that was missing).
+    /// Blits the cached subtree texture of `id` onto
+    /// `SurfaceId::Target`, with the shape's interactive modifier (if
+    /// any) applied as a canvas transform on top of the already-zoomed
+    /// Target canvas. Children are *not* walked here: when `id` is a
+    /// container, its cached texture already contains the whole
+    /// subtree composed (including nested containers, which the inner
+    /// capture populated via the walker intercept in
+    /// `render_shape_tree_partial_uncached`).
     ///
     /// The signature takes `&*tree` so callers can pass a reborrowed
     /// `ShapesPoolRef` while holding the outer `ShapesPoolMutRef`
-    /// alive. The `compose_node` name and its recursive-friendly shape
-    /// are deliberate: the next commit will teach it to descend into
-    /// `shape.children_ids_iter_forward(true)` on cache miss for
-    /// cacheable groups, reusing child textures to avoid rasterizing
-    /// whole subtrees on local edits.
+    /// alive.
     fn compose_node(
         &mut self,
         id: &Uuid,
@@ -3161,6 +3245,81 @@ impl RenderState {
                 }
 
                 if !is_visible {
+                    continue;
+                }
+            }
+
+            // Retained-mode cache intercept: if this non-root shape is a
+            // container whose entire subtree has already been snapshotted
+            // at a compatible scale and version, short-circuit the
+            // traversal — paint the cached texture onto `target_surface`
+            // and skip enter/render/children/exit for this node. The
+            // enclosing ancestor's save_layer (mask/opacity/blur) stays
+            // active around the blit, so container effects inherited from
+            // above compose correctly.
+            //
+            // The cache lives in `shape_cache` and is populated by
+            // `render_retained` bottom-up before any outer capture runs,
+            // so by the time the walker meets a nested cacheable
+            // container its entry is fresh. We never intercept during a
+            // non-retained tile render: `shape_cache` stays empty in that
+            // mode and `is_fresh` always reports false.
+            //
+            // `source_doc_rect` is always in **document** space (same as
+            // `compose_node` on `SurfaceId::Target`). The Fills/Strokes
+            // pipeline achieves that via `update_render_context`, which
+            // sets each intermediate canvas to `scale` ×
+            // `translate(get_render_context_translation(render_area, …))`.
+            // The Export / Current capture surfaces keep an **identity**
+            // matrix on their canvas — content is copied from Fills with
+            // `draw_into` at (0,0). Drawing a doc-space rect directly on
+            // Export therefore misses the bitmap entirely (nested frames
+            // "disappear"). Match the intermediate transform here before
+            // `draw_image_rect`.
+            if !node_render_state.is_root()
+                && !visited_children
+                && self.options.is_retained_mode()
+                && element.is_recursive()
+            {
+                let shape_extrect =
+                    *extrect.get_or_insert_with(|| element.extrect(tree, scale));
+                let effective_scale = self.effective_capture_scale(shape_extrect, scale);
+                let version = tree.shape_version(&node_id).unwrap_or(0);
+                let allow_scale_drift = self.options.is_fast_mode();
+                if self.shape_cache.is_fresh(
+                    &node_id,
+                    version,
+                    effective_scale,
+                    allow_scale_drift,
+                ) {
+                    // Extract what we need before grabbing the canvas,
+                    // which takes `&mut self` and can't coexist with the
+                    // immutable cache borrow.
+                    let (image, source_doc_rect) = {
+                        let entry = self
+                            .shape_cache
+                            .get(&node_id)
+                            .expect("is_fresh returned true");
+                        (entry.image.clone(), entry.source_doc_rect)
+                    };
+                    let sampling = self.sampling_options;
+                    let blit_paint = skia::Paint::default();
+                    let translation = self.surfaces.get_render_context_translation(
+                        self.render_area,
+                        scale,
+                    );
+                    let canvas = self.surfaces.canvas(target_surface);
+                    canvas.save();
+                    canvas.scale((scale, scale));
+                    canvas.translate(translation);
+                    canvas.draw_image_rect_with_sampling_options(
+                        &image,
+                        None,
+                        source_doc_rect,
+                        sampling,
+                        &blit_paint,
+                    );
+                    canvas.restore();
                     continue;
                 }
             }
