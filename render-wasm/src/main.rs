@@ -387,6 +387,16 @@ pub extern "C" fn set_view_end() -> Result<()> {
             // preview of the old content while new tiles render.
             state.render_state.rebuild_tile_index(&state.shapes);
             state.render_state.surfaces.invalidate_tile_cache();
+
+            // Retained-mode textures captured at the previous zoom
+            // are now resampled every frame (we let them drift
+            // during the gesture); drop the ones that no longer
+            // match the final scale so the next render recaptures
+            // at full resolution. Entries already at the GPU
+            // texture cap are preserved — we can't do any better —
+            // which also prevents an infinite recapture loop at
+            // extreme zoom levels.
+            state.render_state.evict_stale_scale_entries(scale);
         } else {
             // Pure pan at the same zoom level: tile contents have not
             // changed — only the viewport position moved. Update the
@@ -433,6 +443,26 @@ pub extern "C" fn set_modifiers_end() -> Result<()> {
         opts.set_interactive_transform(false);
         state.render_state.cancel_animation_frame();
         performance::end_measure!("set_modifiers_end");
+    });
+    Ok(())
+}
+
+/// Toggle the retained-mode compositor. When enabled, the render
+/// loop takes a Figma-style "one texture per top-level shape" path
+/// (`render_retained`) instead of the tile pipeline: dragging a shape
+/// becomes a pure canvas transform on the cached texture, and no
+/// re-rasterization happens until the shape itself is edited.
+///
+/// Exposed as a boolean flag so the frontend can A/B test against the
+/// existing renderer while the retained path is still experimental.
+#[no_mangle]
+#[wasm_error]
+pub extern "C" fn set_retained_mode_enabled(enabled: bool) -> Result<()> {
+    with_state_mut!(state, {
+        state.render_state.options.set_retained_mode(enabled);
+        if !enabled {
+            state.render_state.shape_cache.clear();
+        }
     });
     Ok(())
 }

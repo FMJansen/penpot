@@ -162,6 +162,16 @@ impl Surfaces {
         self.max_atlas_texture_size = max_px.clamp(TILE_SIZE as i32, MAX_ATLAS_TEXTURE_SIZE);
     }
 
+    /// Current per-side pixel budget for GPU surfaces (same limit the atlas
+    /// uses). Callers that allocate Skia surfaces sized from a document
+    /// rect × scale — notably the retained-mode shape capture — must clamp
+    /// against this to avoid overflowing `GL_MAX_TEXTURE_SIZE` at high
+    /// zoom, which otherwise makes `new_surface_with_dimensions` return
+    /// `None` and panics downstream.
+    pub fn max_texture_size(&self) -> i32 {
+        self.max_atlas_texture_size
+    }
+
     fn ensure_atlas_contains(
         &mut self,
         gpu_state: &mut GpuState,

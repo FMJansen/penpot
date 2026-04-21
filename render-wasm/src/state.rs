@@ -90,15 +90,38 @@ impl State {
     }
 
     pub fn render_from_cache(&mut self) {
+        if self.render_state.options.is_retained_mode() {
+            // `render_from_cache` is the pan/zoom fast path of the
+            // tile pipeline: it paints the cached atlas/cache surface
+            // under the current viewbox transform. In retained mode
+            // those surfaces are never populated (we don't run the
+            // tile pipeline at all) so what they hold is either empty
+            // or stale from a pre-retained render — either way it
+            // makes shapes appear shifted while panning/zooming.
+            //
+            // Re-composing via `render_retained` is cheap in steady
+            // state: as long as shape versions and scale haven't
+            // changed the cache just blits the pre-rasterized
+            // textures with the new viewbox transform, which is
+            // exactly what render_from_cache tries to approximate.
+            let _ = self.render_state.render_retained(&mut self.shapes, 0);
+            return;
+        }
         self.render_state.render_from_cache(&self.shapes);
     }
 
     pub fn render_sync(&mut self, timestamp: i32) -> Result<()> {
+        if self.render_state.options.is_retained_mode() {
+            return self.render_state.render_retained(&mut self.shapes, timestamp);
+        }
         self.render_state
             .start_render_loop(None, &self.shapes, timestamp, true)
     }
 
     pub fn render_sync_shape(&mut self, id: &Uuid, timestamp: i32) -> Result<()> {
+        if self.render_state.options.is_retained_mode() {
+            return self.render_state.render_retained(&mut self.shapes, timestamp);
+        }
         self.render_state
             .start_render_loop(Some(id), &self.shapes, timestamp, true)
     }
@@ -114,6 +137,10 @@ impl State {
     }
 
     pub fn start_render_loop(&mut self, timestamp: i32) -> Result<()> {
+        if self.render_state.options.is_retained_mode() {
+            return self.render_state.render_retained(&mut self.shapes, timestamp);
+        }
+
         // If zoom changed (e.g. interrupted zoom render followed by pan), the
         // tile index may be stale for the new viewport position. Rebuild the
         // index so shapes are mapped to the correct tiles. We use
@@ -129,6 +156,13 @@ impl State {
     }
 
     pub fn process_animation_frame(&mut self, timestamp: i32) -> Result<()> {
+        if self.render_state.options.is_retained_mode() {
+            // In retained mode there is no tile pipeline driving
+            // incremental progress: every frame is composed in a
+            // single pass inside `render_retained`, so animation
+            // frames are a no-op.
+            return Ok(());
+        }
         self.render_state
             .process_animation_frame(None, &self.shapes, timestamp)
     }

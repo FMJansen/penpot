@@ -1534,6 +1534,17 @@
   (when (and wasm/context-initialized? (not @wasm/context-lost?))
     (h/call wasm/internal-module "_set_modifiers_end")))
 
+(defn set-retained-mode-enabled
+  "Toggle the experimental retained-mode compositor in the WASM
+   renderer. When enabled, top-level shapes are rasterized once to a
+   cache and recomposed every frame applying their modifier matrix as
+   a canvas transform, similar to how the SVG renderer composites
+   per-node in the browser. Intended for A/B testing drag performance
+   against the default tile pipeline."
+  [enabled?]
+  (when (and wasm/context-initialized? (not @wasm/context-lost?))
+    (h/call wasm/internal-module "_set_retained_mode_enabled" (boolean enabled?))))
+
 (defn set-modifiers
   [modifiers]
 

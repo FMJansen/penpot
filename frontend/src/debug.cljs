@@ -31,6 +31,7 @@
    [app.main.errors :as errors]
    [app.main.repo :as rp]
    [app.main.store :as st]
+   [app.render-wasm.api :as wasm.api]
    [app.render-wasm.helpers :as wasm.h]
    [app.render-wasm.mem :as wasm.mem]
    [app.render-wasm.wasm :as wasm]
@@ -101,6 +102,16 @@
 (defn ^:export debug-none
   []
   (reset! dbg/state #{})
+  (js* "app.main.reinit()"))
+
+(defn ^:export set-retained-mode-enabled
+  "Toggle the experimental WASM retained-mode compositor (Figma-style
+   per-shape texture cache + canvas-transform compositing) for A/B
+   testing drag performance. Call from the devtools console as
+   `debug.setRetainedModeEnabled(true)` / `(false)` and trigger a
+   render to observe the effect."
+  [enabled?]
+  (wasm.api/set-retained-mode-enabled enabled?)
   (js* "app.main.reinit()"))
 
 (defn ^:export tap
