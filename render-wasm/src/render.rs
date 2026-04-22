@@ -1937,13 +1937,15 @@ impl RenderState {
             .max(f32::EPSILON)
     }
 
-    /// Drop cache entries whose `captured_scale` no longer matches
-    /// what we would pick *now* for the same shape. Uses
-    /// [`Self::effective_capture_scale`] so entries already clamped
-    /// to the GPU cap are preserved (we can't do any better than
-    /// what we already have), while entries captured at a lower
-    /// legitimate scale — e.g. before a zoom-in — are evicted so the
-    /// next render picks them up crisply again.
+    /// Drop cache entries that are **undersampled** for the current
+    /// workspace scale: `captured_scale` below what
+    /// [`Self::effective_capture_scale`] would pick now for the same
+    /// `source_doc_rect` (typical after zoom-in).
+    ///
+    /// Entries captured at a **higher** scale (e.g. before a zoom-out)
+    /// are kept: they remain valid for [`ShapeCache::is_fresh`] and
+    /// compose as a downsampled blit. Dropping them would force a
+    /// wasteful re-rasterization with no visual gain.
     pub fn evict_stale_scale_entries(&mut self, current_scale: f32) {
         let mut to_drop: Vec<Uuid> = Vec::new();
         for id in self.shape_cache.iter_ids().collect::<Vec<_>>() {
@@ -1953,7 +1955,7 @@ impl RenderState {
             let expected = self.effective_capture_scale(entry.source_doc_rect, current_scale);
             // Use a small absolute tolerance to avoid flapping from
             // f32 rounding when the scale didn't really change.
-            if (entry.captured_scale - expected).abs() > 1e-3 {
+            if entry.captured_scale + 1e-3 < expected {
                 to_drop.push(id);
             }
         }
