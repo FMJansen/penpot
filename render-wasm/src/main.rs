@@ -461,6 +461,23 @@ pub extern "C" fn set_modifiers_start() -> Result<()> {
     Ok(())
 }
 
+/// Toggle the drag-overlay fast path. When enabled (default), the
+/// renderer bypasses the tile walker during interactive transforms by
+/// compositing cached snapshots on top of a hole-punched atlas. Turn
+/// OFF to fall back to the legacy per-tile walk (useful to isolate
+/// regressions or for screenshots).
+#[no_mangle]
+#[wasm_error]
+pub extern "C" fn set_drag_overlay_enabled(enabled: bool) -> Result<()> {
+    with_state_mut!(state, {
+        state.render_state.options.set_drag_overlay(enabled);
+        if !enabled {
+            state.render_state.drag_overlay = None;
+        }
+    });
+    Ok(())
+}
+
 /// Leave interactive transform mode and cancel any pending async
 /// render scheduled under it. The caller is responsible for triggering
 /// a final full-quality render (typically via `_render`) once the
@@ -473,6 +490,7 @@ pub extern "C" fn set_modifiers_end() -> Result<()> {
         let opts = &mut state.render_state.options;
         opts.set_fast_mode(false);
         opts.set_interactive_transform(false);
+        state.render_state.drag_overlay = None;
         state.render_state.cancel_animation_frame();
         performance::end_measure!("set_modifiers_end");
     });

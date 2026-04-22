@@ -1,4 +1,5 @@
 mod debug;
+pub mod drag_overlay;
 mod fills;
 pub mod filters;
 mod fonts;
@@ -334,6 +335,14 @@ pub(crate) struct RenderState {
     /// Cleared at the beginning of a render pass; set to true after we clear Cache the first
     /// time we are about to blit a tile into Cache for this pass.
     pub cache_cleared_this_render: bool,
+    /// Fast-path state for interactive drag / resize / rotate gestures.
+    /// `None` outside gestures. When populated, the walker excludes the
+    /// shapes in `shape_ids` while rebuilding the atlas backdrop, and the
+    /// hot render path blits the cached snapshots on top of the
+    /// hole-punched atlas in a single pass. See `drag_overlay` module
+    /// docs for the full flow. Disabled entirely when
+    /// `options.is_drag_overlay()` is `false`.
+    pub drag_overlay: Option<drag_overlay::DragOverlay>,
 }
 
 pub fn get_cache_size(viewbox: Viewbox, scale: f32, interest: i32) -> skia::ISize {
@@ -407,6 +416,7 @@ impl RenderState {
             preview_mode: false,
             export_context: None,
             cache_cleared_this_render: false,
+            drag_overlay: None,
         })
     }
 
@@ -2603,6 +2613,19 @@ impl RenderState {
             let clip_bounds = node_render_state.clip_bounds.clone();
 
             is_empty = false;
+
+            // Drag-overlay hole-punch: while the overlay is being built (snapshots
+            // captured but the backdrop atlas not yet refreshed), skip every node
+            // that is part of the selection so the atlas stores a clean backdrop
+            // without the dragged shapes. Exports and already-ready overlays must
+            // render every node normally.
+            if !export {
+                if let Some(overlay) = self.drag_overlay.as_ref() {
+                    if !overlay.backdrop_ready && overlay.shape_ids.contains(&node_id) {
+                        continue;
+                    }
+                }
+            }
 
             let Some(element) = tree.get(&node_id) else {
                 // The shape isn't available yet (likely still streaming in from WASM).

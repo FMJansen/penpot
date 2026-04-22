@@ -22,6 +22,13 @@ pub struct RenderOptions {
     /// keeps per-frame flushing enabled (unlike pan/zoom, where
     /// `render_from_cache` drives target presentation).
     interactive_transform: bool,
+    /// When ON, interactive transforms take a fast overlay path: the
+    /// selected shapes are snapshotted once at gesture start, the atlas
+    /// is hole-punched below them, and per-frame we blit the cached
+    /// backdrop + snapshots with the current modifier matrix instead of
+    /// walking the tile tree. Safe to toggle OFF to fall back to the
+    /// tile-walker path.
+    drag_overlay: bool,
     /// Minimum on-screen size (CSS px at 1:1 zoom) above which vector antialiasing is enabled.
     pub antialias_threshold: f32,
     pub viewport_interest_area_threshold: i32,
@@ -37,6 +44,7 @@ impl Default for RenderOptions {
             dpr: None,
             fast_mode: false,
             interactive_transform: false,
+            drag_overlay: true,
             antialias_threshold: ANTIALIAS_THRESHOLD,
             viewport_interest_area_threshold: VIEWPORT_INTEREST_AREA_THRESHOLD,
             max_blocking_time_ms: MAX_BLOCKING_TIME_MS,
@@ -74,6 +82,17 @@ impl RenderOptions {
 
     pub fn set_interactive_transform(&mut self, enabled: bool) {
         self.interactive_transform = enabled;
+    }
+
+    /// Drag overlay is a fast path taken while `interactive_transform`
+    /// is active: selected shapes are cached once and composited over a
+    /// hole-punched atlas backdrop, bypassing the tile walker entirely.
+    pub fn is_drag_overlay(&self) -> bool {
+        self.drag_overlay
+    }
+
+    pub fn set_drag_overlay(&mut self, enabled: bool) {
+        self.drag_overlay = enabled;
     }
 
     /// True only when the viewport is the one being moved (pan/zoom)
