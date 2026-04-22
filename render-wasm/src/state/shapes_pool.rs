@@ -177,6 +177,20 @@ impl ShapesPoolImpl {
         }
     }
 
+    /// Returns the base (unmodified) shape as stored in the pool.
+    ///
+    /// Unlike `get`, this does **not** apply transient modifiers/structure/scale_content.
+    pub fn get_base(&self, id: &Uuid) -> Option<&Shape> {
+        let idx = *self.uuid_to_idx.get(id)?;
+        Some(&self.shapes[idx])
+    }
+
+    /// Returns the current transient modifier matrix for `id` if present.
+    pub fn get_modifier(&self, id: &Uuid) -> Option<&skia::Matrix> {
+        let idx = *self.uuid_to_idx.get(id)?;
+        self.modifiers.get(&idx)
+    }
+
     // Given an id, returns the depth in the tree-shaped structure
     // of shapes.
     pub fn get_depth(&self, id: &Uuid) -> usize {

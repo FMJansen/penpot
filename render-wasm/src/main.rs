@@ -456,6 +456,7 @@ pub extern "C" fn set_modifiers_start() -> Result<()> {
         let opts = &mut state.render_state.options;
         opts.set_fast_mode(true);
         opts.set_interactive_transform(true);
+        state.render_state.clear_picture_cache();
         performance::end_measure!("set_modifiers_start");
     });
     Ok(())
@@ -473,6 +474,7 @@ pub extern "C" fn set_modifiers_end() -> Result<()> {
         let opts = &mut state.render_state.options;
         opts.set_fast_mode(false);
         opts.set_interactive_transform(false);
+        state.render_state.clear_picture_cache();
         state.render_state.cancel_animation_frame();
         performance::end_measure!("set_modifiers_end");
     });

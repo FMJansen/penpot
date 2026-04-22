@@ -15,7 +15,7 @@ mod ui;
 
 use skia_safe::{self as skia, Matrix, RRect, Rect};
 use std::borrow::Cow;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use gpu_state::GpuState;
 
@@ -334,6 +334,9 @@ pub(crate) struct RenderState {
     /// Cleared at the beginning of a render pass; set to true after we clear Cache the first
     /// time we are about to blit a tile into Cache for this pass.
     pub cache_cleared_this_render: bool,
+    /// Per-gesture cache of recorded draw commands for leaf shapes.
+    /// Used to speed up interactive transforms by replaying commands with a modifier matrix.
+    picture_cache: HashMap<Uuid, skia::Picture>,
 }
 
 pub fn get_cache_size(viewbox: Viewbox, scale: f32, interest: i32) -> skia::ISize {
@@ -407,7 +410,12 @@ impl RenderState {
             preview_mode: false,
             export_context: None,
             cache_cleared_this_render: false,
+            picture_cache: HashMap::new(),
         })
+    }
+
+    pub fn clear_picture_cache(&mut self) {
+        self.picture_cache.clear();
     }
 
     /// Combines every visible layer blur currently active (ancestors + shape)
@@ -1674,6 +1682,15 @@ impl RenderState {
         self.cache_cleared_this_render = false;
         self.reset_canvas();
 
+        // `picture_cache` is per-gesture and is cleared from the WASM exports
+        // (`set_modifiers_start`/`set_modifiers_end`). Keep this method side-effect free.
+
+        // Compute and set document-space bounds (1 unit == 1 doc px @ 100% zoom)
+        // to clamp atlas updates. This prevents zoom-out tiles from forcing atlas
+        // growth far beyond real content.
+        let doc_bounds = self.compute_document_bounds(base_object, tree);
+        self.surfaces.set_atlas_doc_bounds(doc_bounds);
+
         // During an interactive shape transform (drag/resize/rotate) the
         // Target is repainted tile-by-tile. If only a subset of the
         // invalidated tiles finishes in this rAF the remaining area
@@ -1765,6 +1782,64 @@ impl RenderState {
         performance::end_measure!("start_render_loop");
         performance::end_timed_log!("start_render_loop", _start);
         Ok(())
+    }
+
+    fn get_or_record_simple_rect_picture(
+        &mut self,
+        shape_id: &Uuid,
+        base_shape: &Shape,
+        fill: &Fill,
+        antialias: bool,
+    ) -> Option<skia::Picture> {
+        if let Some(picture) = self.picture_cache.get(shape_id) {
+            return Some(picture.clone());
+        }
+
+        let bounds = base_shape.selrect();
+        if bounds.is_empty() {
+            return None;
+        }
+
+        let mut recorder = skia::PictureRecorder::new();
+        let canvas = recorder.begin_recording(bounds, false);
+        let mut paint = fill.to_paint(&bounds, antialias);
+        canvas.draw_rect(bounds, &paint);
+        drop(paint);
+        let picture = recorder.finish_recording_as_picture(None)?;
+
+        self.picture_cache.insert(*shape_id, picture.clone());
+        Some(picture)
+    }
+
+    fn compute_document_bounds(
+        &mut self,
+        base_object: Option<&Uuid>,
+        tree: ShapesPoolRef,
+    ) -> Option<skia::Rect> {
+        let ids: Vec<Uuid> = if let Some(id) = base_object {
+            vec![*id]
+        } else {
+            let root = tree.get(&Uuid::nil())?;
+            root.children_ids(false)
+        };
+
+        let mut acc: Option<skia::Rect> = None;
+        for id in ids.iter() {
+            let Some(shape) = tree.get(id) else {
+                continue;
+            };
+            let r = self.get_cached_extrect(shape, tree, 1.0);
+            if r.is_empty() {
+                continue;
+            }
+            acc = Some(if let Some(mut a) = acc {
+                a.join(r);
+                a
+            } else {
+                r
+            });
+        }
+        acc
     }
 
     pub fn process_animation_frame(
@@ -2741,19 +2816,76 @@ impl RenderState {
                         .draw_into(SurfaceId::DropShadows, target_surface, None);
                 }
 
-                self.render_shape(
-                    element,
-                    clip_bounds.clone(),
-                    SurfaceId::Fills,
-                    SurfaceId::Strokes,
-                    SurfaceId::InnerShadows,
-                    SurfaceId::TextDropShadows,
-                    true,
-                    None,
-                    None,
-                    None,
-                    target_surface,
-                )?;
+                // Interactive-transform fast path: replay a recorded Picture for very simple
+                // leaf rects, applying only the modifier matrix per frame.
+                let mut rendered_via_picture = false;
+                if self.options.is_interactive_transform()
+                    && !element.is_recursive()
+                    && clip_bounds.is_none()
+                    && element.transform.is_identity()
+                    && element.opacity() == 1.0
+                    && element.shadows.is_empty()
+                    && element.blur.is_none()
+                    && element.strokes.is_empty()
+                    && matches!(element.shape_type, Type::Rect(_))
+                    && element.fills.len() == 1
+                    && matches!(element.fills[0], Fill::Solid(_))
+                    && target_surface != SurfaceId::Export
+                {
+                    if let (Some(modifier), Some(base_shape)) =
+                        (tree.get_modifier(&node_id), tree.get_base(&node_id))
+                    {
+                        if base_shape.transform.is_identity()
+                            && base_shape.fills.len() == 1
+                            && matches!(base_shape.fills[0], Fill::Solid(_))
+                        {
+                            let antialias = base_shape.should_use_antialias(
+                                self.get_scale(),
+                                self.options.antialias_threshold,
+                            );
+                            if let Some(picture) = self.get_or_record_simple_rect_picture(
+                                &node_id,
+                                base_shape,
+                                &base_shape.fills[0],
+                                antialias,
+                            ) {
+                                println!("draw picture");
+                                let picture = picture.clone();
+                                let scale = self.get_scale();
+                                let translation = self
+                                    .surfaces
+                                    .get_render_context_translation(self.render_area, scale);
+                                self.surfaces.apply_mut(target_surface as u32, |s| {
+                                    let canvas = s.canvas();
+                                    canvas.save();
+                                    canvas.scale((scale, scale));
+                                    canvas.translate(translation);
+                                    canvas.concat(modifier);
+                                    canvas.draw_picture(&picture, None, None);
+                                    canvas.restore();
+                                });
+                                rendered_via_picture = true;
+                            }
+                        }
+                    }
+                }
+
+                if !rendered_via_picture {
+                    println!("render_shape");
+                    self.render_shape(
+                        element,
+                        clip_bounds.clone(),
+                        SurfaceId::Fills,
+                        SurfaceId::Strokes,
+                        SurfaceId::InnerShadows,
+                        SurfaceId::TextDropShadows,
+                        true,
+                        None,
+                        None,
+                        None,
+                        target_surface,
+                    )?;
+                }
 
                 self.surfaces
                     .canvas(SurfaceId::DropShadows)
