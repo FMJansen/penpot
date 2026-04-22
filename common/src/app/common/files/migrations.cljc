@@ -1786,6 +1786,21 @@
         (update :pages-index d/update-vals update-container)
         (d/update-when :components d/update-vals update-container))))
 
+(defmethod migrate-data "0018-fix-shape-svg-attrs"
+  [data _]
+  (some-> cfeat/*new* (swap! conj "fdata/shape-data-type"))
+  (letfn [(update-object [object]
+            (-> object
+                (d/update-when :svg-attrs csvg/attrs->props)
+                (d/update-when :svg-viewbox grc/make-rect)))
+
+          (update-container [container]
+            (d/update-when container :objects d/update-vals update-object))]
+
+    (-> data
+        (update :pages-index d/update-vals update-container)
+        (d/update-when :components d/update-vals update-container))))
+
 (def available-migrations
   (into (d/ordered-set)
         ["legacy-2"
@@ -1860,4 +1875,5 @@
          "0015-fix-text-attrs-blank-strings"
          "0015-clean-shadow-color"
          "0016-copy-fills-from-position-data-to-text-node"
-         "0017-fix-layout-flex-dir"]))
+         "0017-fix-layout-flex-dir"
+         "0018-fix-shape-svg-attrs"]))
