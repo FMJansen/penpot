@@ -211,6 +211,15 @@ impl ShapesPoolImpl {
         self.modified_shape_cache.clear()
     }
 
+    /// Returns the modifier matrix currently applied to `id`, if any.
+    /// Used by the drag-overlay fast path to composite cached snapshots
+    /// at their transformed position without reading the modified shape
+    /// through `get()` (which also rebuilds geometry).
+    pub fn modifier_of(&self, id: &Uuid) -> Option<&Matrix> {
+        let idx = self.uuid_to_idx.get(id)?;
+        self.modifiers.get(idx)
+    }
+
     pub fn set_modifiers(&mut self, modifiers: HashMap<Uuid, skia::Matrix>) {
         // Convert HashMap<Uuid, V> to HashMap<usize, V> using indices
         // Initialize the cache cells for affected shapes

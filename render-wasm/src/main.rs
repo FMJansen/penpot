@@ -490,7 +490,22 @@ pub extern "C" fn set_modifiers_end() -> Result<()> {
         let opts = &mut state.render_state.options;
         opts.set_fast_mode(false);
         opts.set_interactive_transform(false);
+
+        // Invalidate every tile covered by the overlay before dropping
+        // it: the atlas still carries holes where the snapshots sat and
+        // the next non-overlay render must repaint those regions from
+        // scratch (otherwise the shapes would reappear at their old
+        // position or gaps would remain when modifiers are committed).
+        let overlay_ids: Option<Vec<Uuid>> = state
+            .render_state
+            .drag_overlay
+            .as_ref()
+            .map(|o| o.shape_ids.iter().copied().collect());
         state.render_state.drag_overlay = None;
+        if let Some(ids) = overlay_ids {
+            let _ = state.rebuild_modifier_tiles(ids);
+        }
+
         state.render_state.cancel_animation_frame();
         performance::end_measure!("set_modifiers_end");
     });
@@ -990,8 +1005,19 @@ pub extern "C" fn set_modifiers() -> Result<()> {
     }
 
     with_state_mut!(state, {
+        // Try to set up the drag-overlay fast path before mutating the
+        // pool. The setup captures untransformed snapshots and requires
+        // access to the pre-modifier geometry; after this returns it is
+        // safe to apply modifiers. `used_overlay == true` also means
+        // `ensure_drag_overlay_setup` already invalidated the tiles it
+        // cares about, so we skip the broader `rebuild_modifier_tiles`
+        // invalidation (the walker won't be running during the gesture
+        // from now on — the fast render path will bypass it).
+        let used_overlay = state.ensure_drag_overlay_setup(&ids)?;
         state.set_modifiers(modifiers);
-        state.rebuild_modifier_tiles(ids)?;
+        if !used_overlay {
+            state.rebuild_modifier_tiles(ids)?;
+        }
     });
     Ok(())
 }

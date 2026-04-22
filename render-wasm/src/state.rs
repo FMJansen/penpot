@@ -1,5 +1,5 @@
 use skia_safe::{self as skia, textlayout::FontCollection, Path, Point};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 mod shapes_pool;
 mod text_editor;
@@ -7,6 +7,8 @@ pub use shapes_pool::{ShapesPool, ShapesPoolMutRef, ShapesPoolRef};
 pub use text_editor::*;
 
 use crate::error::{Error, Result};
+use crate::performance;
+use crate::render::drag_overlay::{DragOverlay, DragOverlaySnapshot};
 use crate::render::RenderState;
 use crate::shapes::Shape;
 use crate::tiles;
@@ -294,6 +296,92 @@ impl State {
 
     pub fn set_modifiers(&mut self, modifiers: HashMap<Uuid, skia::Matrix>) {
         self.shapes.set_modifiers(modifiers);
+    }
+
+    /// Set up the drag-overlay fast path for the current gesture, if
+    /// enabled and not already set up. Returns `true` when the overlay
+    /// is active after this call (either just created or pre-existing).
+    ///
+    /// Must be called **before** `set_modifiers` applies the new
+    /// transforms to the pool so snapshots are captured at the
+    /// untransformed position. If setup fails for any reason (shape
+    /// missing, capture error, empty selection) the overlay is left
+    /// absent and the caller should fall back to the regular tile
+    /// walker path (`rebuild_modifier_tiles`).
+    pub fn ensure_drag_overlay_setup(&mut self, ids: &[Uuid]) -> Result<bool> {
+        {
+            let opts = &self.render_state.options;
+            if !opts.is_drag_overlay() || !opts.is_interactive_transform() {
+                return Ok(false);
+            }
+        }
+
+        if self.render_state.drag_overlay.is_some() {
+            return Ok(true);
+        }
+
+        if ids.is_empty() {
+            return Ok(false);
+        }
+
+        let mut shape_ids: HashSet<Uuid> = HashSet::with_capacity(ids.len());
+        for id in ids {
+            if let Some(shape) = self.shapes.get(id) {
+                if !shape.hidden {
+                    shape_ids.insert(*id);
+                }
+            }
+        }
+        if shape_ids.is_empty() {
+            return Ok(false);
+        }
+
+        let timestamp = performance::get_time();
+        let scale = self.render_state.get_scale();
+        let mut snapshots: HashMap<Uuid, DragOverlaySnapshot> =
+            HashMap::with_capacity(shape_ids.len());
+
+        // Collect into a Vec first so we are not holding a borrow of
+        // `shape_ids` while we call into render_state which reborrows
+        // self via `&self.shapes`.
+        let capture_ids: Vec<Uuid> = shape_ids.iter().copied().collect();
+        for id in capture_ids {
+            match self
+                .render_state
+                .capture_shape_image(&id, &self.shapes, scale, timestamp)?
+            {
+                Some((image, source_doc_rect, captured_scale)) => {
+                    snapshots.insert(
+                        id,
+                        DragOverlaySnapshot {
+                            image,
+                            source_doc_rect,
+                            captured_scale,
+                        },
+                    );
+                }
+                None => return Ok(false),
+            }
+        }
+
+        if snapshots.is_empty() {
+            return Ok(false);
+        }
+
+        // Invalidate tiles intersecting the selected shapes so the next
+        // walker pass rebuilds them with the overlay filter active,
+        // leaving a hole-punched atlas.
+        let ids_vec: Vec<Uuid> = shape_ids.iter().copied().collect();
+        self.render_state
+            .rebuild_modifier_tiles(&mut self.shapes, ids_vec)?;
+
+        self.render_state.drag_overlay = Some(DragOverlay {
+            shape_ids,
+            snapshots,
+            backdrop_ready: false,
+        });
+
+        Ok(true)
     }
 
     pub fn touch_current(&mut self) {

@@ -1665,6 +1665,72 @@ impl RenderState {
         Ok(())
     }
 
+    /// Fast-path render used while the drag-overlay is active.
+    ///
+    /// Once every selected shape has a cached snapshot and the atlas
+    /// has been hole-punched (see `drag_overlay::DragOverlay::is_ready`),
+    /// a drag frame is reduced to: one atlas blit (the stable backdrop)
+    /// plus one `draw_image_rect` per selected shape with the current
+    /// modifier matrix concatenated in document space. The tile walker
+    /// is not touched at all.
+    fn render_drag_overlay(&mut self, tree: ShapesPoolRef) -> Result<()> {
+        performance::begin_measure!("render_drag_overlay");
+        self.reset_canvas();
+
+        let dpr = self.options.dpr();
+        let viewbox = self.viewbox;
+        let bg_color = self.background_color;
+
+        // Stable backdrop (atlas carries the hole-punched scene).
+        self.surfaces.draw_atlas_to_target(viewbox, dpr, bg_color);
+
+        if let Some(overlay) = self.drag_overlay.as_ref() {
+            let sampling = self.sampling_options;
+            let canvas = self.surfaces.canvas(SurfaceId::Target);
+            let s = viewbox.zoom * dpr;
+
+            canvas.save();
+            canvas.reset_matrix();
+            let size = canvas.base_layer_size();
+            canvas.clip_rect(
+                skia::Rect::from_xywh(0.0, 0.0, size.width as f32, size.height as f32),
+                None,
+                true,
+            );
+            canvas.translate((viewbox.pan_x * s, viewbox.pan_y * s));
+            canvas.scale((s, s));
+
+            let paint = skia::Paint::default();
+            for (id, snap) in overlay.snapshots.iter() {
+                let modifier = tree.modifier_of(id).copied();
+                canvas.save();
+                if let Some(m) = modifier {
+                    canvas.concat(&m);
+                }
+                canvas.draw_image_rect_with_sampling_options(
+                    &snap.image,
+                    None,
+                    snap.source_doc_rect,
+                    sampling,
+                    &paint,
+                );
+                canvas.restore();
+            }
+
+            canvas.restore();
+        }
+
+        // UI + debug overlays (selection rects, rulers, etc.) still
+        // need to land on top of the composited scene.
+        ui::render(self, tree);
+        debug::render_wasm_label(self);
+
+        self.flush_and_submit();
+        wapi::notify_tiles_render_complete!();
+        performance::end_measure!("render_drag_overlay");
+        Ok(())
+    }
+
     pub fn start_render_loop(
         &mut self,
         base_object: Option<&Uuid>,
@@ -1672,6 +1738,20 @@ impl RenderState {
         timestamp: i32,
         sync_render: bool,
     ) -> Result<()> {
+        // Drag-overlay fast path: skip the tile walker entirely and
+        // composite cached snapshots over the hole-punched atlas. Only
+        // kicks in from the second `set_modifiers` of the gesture
+        // onwards — the first one runs the walker with `exclude_ids`
+        // active to produce the clean backdrop (see below).
+        if self.options.is_interactive_transform()
+            && self
+                .drag_overlay
+                .as_ref()
+                .map_or(false, |o| o.is_ready())
+        {
+            return self.render_drag_overlay(tree);
+        }
+
         let _start = performance::begin_timed_log!("start_render_loop");
         let scale = self.get_scale();
 
@@ -1756,6 +1836,19 @@ impl RenderState {
 
         self.apply_drawing_to_render_canvas(None, SurfaceId::Current);
 
+        // When the drag overlay has captured snapshots but the atlas
+        // backdrop has not yet been produced, we must complete the
+        // tile walker (with the overlay filter active) in this single
+        // rAF so the atlas ends up hole-punched before the next frame
+        // takes the fast `render_drag_overlay` path. A non-sync render
+        // could leave the atlas with leftover ghosts of the dragged
+        // shapes for however many frames the walker needs to finish.
+        let overlay_building = self
+            .drag_overlay
+            .as_ref()
+            .map_or(false, |o| !o.backdrop_ready);
+        let sync_render = sync_render || overlay_building;
+
         if sync_render {
             self.render_shape_tree_sync(base_object, tree, timestamp)?;
         } else {
@@ -1769,6 +1862,16 @@ impl RenderState {
             // never completes — each pan frame cancels it.
             if self.cache_cleared_this_render {
                 self.cached_viewbox = self.viewbox;
+            }
+        }
+
+        // The first frame of a drag with the overlay enabled runs the
+        // walker with the selected shapes excluded, which rewrites the
+        // tiles and atlas without them. Mark the backdrop ready so
+        // subsequent frames bypass the walker entirely.
+        if overlay_building {
+            if let Some(overlay) = self.drag_overlay.as_mut() {
+                overlay.backdrop_ready = true;
             }
         }
 
@@ -1825,6 +1928,126 @@ impl RenderState {
         }
         self.flush_and_submit();
         Ok(())
+    }
+
+    /// Render a single shape (and its subtree) into an `skia::Image`
+    /// without touching any workspace state. Used by the drag-overlay
+    /// fast path to snapshot the selected shapes at gesture start.
+    ///
+    /// Returns `(image, source_doc_rect, captured_scale)`. The caller
+    /// draws the image into `source_doc_rect` in document space and
+    /// (optionally) concatenates the shape's current modifier matrix on
+    /// top to place it at its transformed position.
+    pub fn capture_shape_image(
+        &mut self,
+        id: &Uuid,
+        tree: ShapesPoolRef,
+        scale: f32,
+        timestamp: i32,
+    ) -> Result<Option<(skia::Image, Rect, f32)>> {
+        let target_surface = SurfaceId::Export;
+
+        // Mirror the save/restore logic from `render_shape_pixels` so the
+        // workspace render context is not perturbed by this off-screen pass.
+        let saved_focus_mode = self.focus_mode.clone();
+        let saved_export_context = self.export_context;
+        let saved_render_area = self.render_area;
+        let saved_render_area_with_margins = self.render_area_with_margins;
+        let saved_current_tile = self.current_tile;
+        let saved_pending_nodes = std::mem::take(&mut self.pending_nodes);
+        let saved_nested_fills = std::mem::take(&mut self.nested_fills);
+        let saved_nested_blurs = std::mem::take(&mut self.nested_blurs);
+        let saved_nested_shadows = std::mem::take(&mut self.nested_shadows);
+        let saved_ignore_nested_blurs = self.ignore_nested_blurs;
+        let saved_preview_mode = self.preview_mode;
+
+        // Disable fast_mode / interactive_transform while capturing so
+        // the snapshot contains full-quality effects (drop shadows,
+        // blurs, etc.). Otherwise the cached image would be rasterized
+        // with the same shortcuts used during pan/zoom and the dragged
+        // shape would visually lose its shadows the moment the overlay
+        // takes over.
+        let saved_fast_mode = self.options.is_fast_mode();
+        let saved_interactive_transform = self.options.is_interactive_transform();
+        self.options.set_fast_mode(false);
+        self.options.set_interactive_transform(false);
+
+        self.focus_mode.clear();
+        self.surfaces
+            .canvas(target_surface)
+            .clear(skia::Color::TRANSPARENT);
+
+        let Some(shape) = tree.get(id) else {
+            // Restore and bail if the shape vanished mid-gesture.
+            self.options.set_fast_mode(saved_fast_mode);
+            self.options
+                .set_interactive_transform(saved_interactive_transform);
+            self.focus_mode = saved_focus_mode;
+            self.export_context = saved_export_context;
+            self.render_area = saved_render_area;
+            self.render_area_with_margins = saved_render_area_with_margins;
+            self.current_tile = saved_current_tile;
+            self.pending_nodes = saved_pending_nodes;
+            self.nested_fills = saved_nested_fills;
+            self.nested_blurs = saved_nested_blurs;
+            self.nested_shadows = saved_nested_shadows;
+            self.ignore_nested_blurs = saved_ignore_nested_blurs;
+            self.preview_mode = saved_preview_mode;
+            return Ok(None);
+        };
+
+        let source_doc_rect = shape.extrect(tree, scale);
+        let mut extrect = source_doc_rect;
+        self.export_context = Some((extrect, scale));
+        let margins = self.surfaces.margins;
+        extrect.offset((margins.width as f32 / scale, margins.height as f32 / scale));
+
+        self.surfaces.resize_export_surface(scale, extrect);
+        self.render_area = extrect;
+        self.render_area_with_margins = extrect;
+        self.surfaces.update_render_context(extrect, scale);
+
+        self.pending_nodes.push(NodeRenderState {
+            id: *id,
+            visited_children: false,
+            clip_bounds: None,
+            visited_mask: false,
+            mask: false,
+            flattened: false,
+        });
+        self.render_shape_tree_partial_uncached(tree, timestamp, false, true)?;
+
+        self.export_context = None;
+        self.surfaces
+            .flush_and_submit(&mut self.gpu_state, target_surface);
+
+        let image = self.surfaces.snapshot(target_surface);
+
+        // Restore workspace state.
+        self.options.set_fast_mode(saved_fast_mode);
+        self.options
+            .set_interactive_transform(saved_interactive_transform);
+        self.focus_mode = saved_focus_mode;
+        self.export_context = saved_export_context;
+        self.render_area = saved_render_area;
+        self.render_area_with_margins = saved_render_area_with_margins;
+        self.current_tile = saved_current_tile;
+        self.pending_nodes = saved_pending_nodes;
+        self.nested_fills = saved_nested_fills;
+        self.nested_blurs = saved_nested_blurs;
+        self.nested_shadows = saved_nested_shadows;
+        self.ignore_nested_blurs = saved_ignore_nested_blurs;
+        self.preview_mode = saved_preview_mode;
+
+        let workspace_scale = self.get_scale();
+        if let Some(tile) = self.current_tile {
+            self.update_render_context(tile);
+        } else if !self.render_area.is_empty() {
+            self.surfaces
+                .update_render_context(self.render_area, workspace_scale);
+        }
+
+        Ok(Some((image, source_doc_rect, scale)))
     }
 
     pub fn render_shape_pixels(
