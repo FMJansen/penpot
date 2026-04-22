@@ -502,8 +502,26 @@ pub extern "C" fn set_modifiers_end() -> Result<()> {
 pub extern "C" fn set_retained_mode_enabled(enabled: bool) -> Result<()> {
     with_state_mut!(state, {
         state.render_state.options.set_retained_mode(enabled);
+        // Do NOT wipe `shape_cache` when toggling retained-mode: the
+        // same store is also used by the leaf-cache path for the
+        // default (tile-based) pipeline. Clearing it here would
+        // throw away perfectly valid leaf entries every time the
+        // A/B switch is flipped.
+    });
+    Ok(())
+}
+
+/// Toggle the per-leaf texture cache used by the tile walker. When
+/// disabled the walker always rasterizes leaves from scratch — mostly
+/// useful as an A/B kill switch from the frontend.
+#[no_mangle]
+#[wasm_error]
+pub extern "C" fn set_leaf_cache_enabled(enabled: bool) -> Result<()> {
+    with_state_mut!(state, {
+        state.render_state.options.set_leaf_cache(enabled);
         if !enabled {
             state.render_state.shape_cache.clear();
+            state.render_state.pending_leaf_captures.clear();
         }
     });
     Ok(())

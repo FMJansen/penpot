@@ -336,11 +336,19 @@ pub(crate) struct RenderState {
     /// Cleared at the beginning of a render pass; set to true after we clear Cache the first
     /// time we are about to blit a tile into Cache for this pass.
     pub cache_cleared_this_render: bool,
-    /// Retained-mode compositor cache: one entry per top-level shape
-    /// holding its rasterized subtree. Populated on demand by
-    /// `render_retained` and invalidated automatically by comparing
-    /// `captured_version` against the current `ShapesPool::shape_version`.
+    /// Per-leaf texture cache. Entries are populated on-demand by the
+    /// tile walker (`render_shape_tree_partial_uncached`) when
+    /// `options.leaf_cache` is enabled — one entry per leaf shape
+    /// (`!shape.is_recursive()`) — and blitted back on subsequent
+    /// frames instead of re-rasterizing, turning edit/drag repaints
+    /// into single GPU blits.
     pub shape_cache: ShapeCache,
+    /// Leaf shapes the walker just intercepted with a cache miss,
+    /// queued for off-walker capture once the current frame finishes.
+    /// Tuples are `(shape_id, shape_version)` so `flush_pending_leaf_captures`
+    /// can validate the queued version against the current pool state
+    /// before paying for the capture.
+    pub pending_leaf_captures: Vec<(Uuid, u64)>,
 }
 
 pub fn get_cache_size(viewbox: Viewbox, scale: f32, interest: i32) -> skia::ISize {
@@ -415,6 +423,7 @@ impl RenderState {
             export_context: None,
             cache_cleared_this_render: false,
             shape_cache: ShapeCache::new(),
+            pending_leaf_captures: Vec::new(),
         })
     }
 
@@ -1932,6 +1941,21 @@ impl RenderState {
         Ok((data.as_bytes().to_vec(), width, height))
     }
 
+    /// `true` when `shape` is a leaf whose rasterization we can legally
+    /// swap for a cached bitmap blit. We deliberately stay conservative
+    /// for the MVP: any shape whose final compositing depends on the
+    /// destination (non-default blend modes, opacity layer, frame-clip
+    /// layer blur, masked groups) goes through the regular pipeline so
+    /// we don't have to re-implement blend math on top of
+    /// `draw_image_rect`.
+    ///
+    /// Groups/frames/bools return `false` here — we only cache leaves so
+    /// children can keep invalidating tiles through the normal flow.
+    #[inline]
+    fn is_leaf_cacheable(shape: &Shape) -> bool {
+        !shape.is_recursive() && !shape.hidden && !shape.needs_layer()
+    }
+
     /// Capture scale we will actually use to rasterize a shape whose
     /// extrect covers `rect` at a requested workspace scale of
     /// `requested_scale`. It may be lower than `requested_scale` at
@@ -1977,6 +2001,89 @@ impl RenderState {
         for id in to_drop {
             self.shape_cache.remove(&id);
         }
+    }
+
+    /// Drain `pending_leaf_captures` (populated by the walker's cache
+    /// miss branch) and capture up to `cap` leaves into
+    /// `shape_cache`. Invariants:
+    ///
+    /// - We only capture shapes that are still a leaf and whose
+    ///   `shape_version` hasn't moved since the walker queued them;
+    ///   anything else is silently dropped and will be re-queued on the
+    ///   next render if it's still visible.
+    /// - We skip captures while a pan/zoom gesture is in flight
+    ///   (`options.is_fast_mode`): the effective scale is still moving,
+    ///   any capture taken now would be invalidated by
+    ///   `evict_stale_scale_entries` at `set_view_end`.
+    ///
+    /// Capping the number of captures per frame keeps the worst-case
+    /// added latency bounded when a page full of previously-unseen
+    /// leaves scrolls into view.
+    pub fn flush_pending_leaf_captures(
+        &mut self,
+        tree: ShapesPoolRef,
+        timestamp: i32,
+        cap: usize,
+    ) -> Result<()> {
+        if !self.options.is_leaf_cache() || self.pending_leaf_captures.is_empty() {
+            self.pending_leaf_captures.clear();
+            return Ok(());
+        }
+        if self.options.is_fast_mode() {
+            self.pending_leaf_captures.clear();
+            return Ok(());
+        }
+
+        let scale = self.get_scale();
+        let mut queue = std::mem::take(&mut self.pending_leaf_captures);
+        let mut processed = 0usize;
+        for (id, queued_version) in queue.drain(..) {
+            if processed >= cap {
+                break;
+            }
+            let Some(shape) = tree.get(&id) else { continue };
+            if !Self::is_leaf_cacheable(shape) {
+                continue;
+            }
+            let current_version = tree.shape_version(&id).unwrap_or(0);
+            if current_version != queued_version {
+                // Stale queue entry — the shape mutated since the
+                // walker saw it; next render will re-queue.
+                continue;
+            }
+            // If another tile walker iteration already filled the
+            // cache in the same frame (dedup sometimes misses across
+            // the margin-padded re-entries), skip.
+            let effective_scale =
+                self.effective_capture_scale(shape.extrect(tree, scale), scale);
+            if self
+                .shape_cache
+                .is_fresh(&id, current_version, effective_scale, false)
+            {
+                continue;
+            }
+
+            let capture = self.capture_shape_image(&id, tree, scale, None, timestamp)?;
+            match capture {
+                Some((image, source_doc_rect, captured_scale)) => {
+                    self.shape_cache.insert(
+                        id,
+                        ShapeCacheEntry {
+                            image,
+                            captured_version: current_version,
+                            captured_scale,
+                            source_doc_rect,
+                        },
+                    );
+                }
+                None => {
+                    self.shape_cache.remove(&id);
+                }
+            }
+            processed += 1;
+        }
+
+        Ok(())
     }
 
     /// Rasterize `id` and its whole subtree into a standalone
@@ -3146,6 +3253,104 @@ impl RenderState {
                 }
             }
 
+            // Leaf-cache intercept. When `options.leaf_cache` is
+            // enabled we try to short-circuit the per-shape
+            // rasterization by blitting a previously captured image
+            // for this leaf. Any miss queues the shape for a deferred
+            // capture (handled after the walker finishes), and we fall
+            // through to the normal rendering path so the frame is
+            // correct even on first sight.
+            if !export
+                && !node_render_state.is_root()
+                && !mask
+                && clip_bounds.is_none()
+                && self.options.is_leaf_cache()
+                && self.focus_mode.should_focus(&element.id)
+                && !self.options.is_debug_visible()
+                && Self::is_leaf_cacheable(element)
+            {
+                let element_extrect =
+                    *extrect.get_or_insert_with(|| element.extrect(tree, scale));
+                let effective_scale =
+                    self.effective_capture_scale(element_extrect, scale);
+                let version = tree.shape_version(&node_id).unwrap_or(0);
+                // During pan/zoom gestures we allow a slightly stale
+                // scale so we keep blitting old textures instead of
+                // invalidating them mid-gesture — mirrors what the
+                // atlas/tile pipeline does.
+                let allow_scale_drift = self.options.is_fast_mode();
+                let is_fresh = self.shape_cache.is_fresh(
+                    &node_id,
+                    version,
+                    effective_scale,
+                    allow_scale_drift,
+                );
+
+                if is_fresh {
+                    if let Some(entry) = self.shape_cache.get(&node_id) {
+                        let image = entry.image.clone();
+                        let source_doc_rect = entry.source_doc_rect;
+                        let modifier = tree.modifier_of(&node_id);
+                        let fills_surface = SurfaceId::Fills;
+                        let sampling = self.sampling_options;
+
+                        // Fills already has `scale + translate` baked
+                        // in via `update_render_context`, so drawing
+                        // the image at its captured document-space
+                        // rect lands at the correct screen position.
+                        // The modifier (if any) is concatenated on top
+                        // so drag/resize of the leaf turns into a pure
+                        // transform of the blit.
+                        let canvas = self.surfaces.canvas(fills_surface);
+                        canvas.save();
+                        if let Some(m) = modifier {
+                            canvas.concat(&m);
+                        }
+                        let paint = skia::Paint::default();
+                        canvas.draw_image_rect_with_sampling_options(
+                            &image,
+                            None,
+                            source_doc_rect,
+                            sampling,
+                            &paint,
+                        );
+                        canvas.restore();
+                        self.surfaces.mark_dirty(fills_surface);
+
+                        // Composite Fills -> target (the `Current`
+                        // tile surface in the online path) so the
+                        // blit is visible this frame, matching what
+                        // `render_shape` + `apply_drawing_to_render_canvas`
+                        // would have produced.
+                        self.apply_drawing_to_render_canvas(
+                            Some(element),
+                            target_surface,
+                        );
+
+                        iteration += 1;
+                        if allow_stop && self.should_stop_rendering(iteration, timestamp) {
+                            return Ok((is_empty, true));
+                        }
+                        continue;
+                    }
+                } else {
+                    // Cache miss: let the normal pipeline render this
+                    // frame and record the leaf for a deferred capture
+                    // so the next frame becomes a cheap blit. Only
+                    // queue under non-drift conditions — while the user
+                    // is actively panning/zooming the scale is moving
+                    // so captures would be thrown away immediately.
+                    if !allow_scale_drift
+                        && !self
+                            .pending_leaf_captures
+                            .iter()
+                            .any(|(id, _)| id == &node_id)
+                    {
+                        self.pending_leaf_captures.push((node_id, version));
+                    }
+                }
+            }
+
             let can_flatten = element.can_flatten() && !self.focus_mode.should_focus(&element.id);
 
             // Skip render_shape_enter/exit for flattened containers
@@ -3466,6 +3671,14 @@ impl RenderState {
         }
 
         self.render_in_progress = false;
+
+        // Leaf-cache deferred captures. Populated by the tile walker
+        // whenever it hits a cache miss on a leaf; handled here so the
+        // per-shape Export pass doesn't contend with the per-tile
+        // render budget. Capped at a small batch per frame to keep the
+        // extra work bounded during heavy scrolling; whatever doesn't
+        // fit stays queued for the next render tick.
+        self.flush_pending_leaf_captures(tree, timestamp, 8)?;
 
         self.surfaces.gc();
 

@@ -28,6 +28,16 @@ pub struct RenderOptions {
     /// canvas transform, instead of being re-rasterized from scratch.
     /// Behaves like the SVG compositor in the browser.
     retained_mode: bool,
+    /// Per-leaf texture cache. When enabled the tile walker blits the
+    /// cached image of a leaf shape (any shape where `!is_recursive()`)
+    /// instead of re-rasterizing it, as long as the cached entry is
+    /// fresh (same `shape_version`, same effective capture scale).
+    /// Leaves that are visible but not yet cached are captured in a
+    /// post-walker pass, with a per-frame cap, so the first frame is
+    /// paid for once and subsequent frames become GPU blits. Unlike
+    /// `retained_mode` this keeps the tile + atlas pipeline as the
+    /// main driver, so pan/zoom caching behaviour is unchanged.
+    leaf_cache: bool,
     /// Minimum on-screen size (CSS px at 1:1 zoom) above which vector antialiasing is enabled.
     pub antialias_threshold: f32,
     pub viewport_interest_area_threshold: i32,
@@ -49,13 +59,19 @@ impl Default for RenderOptions {
             node_batch_threshold: NODE_BATCH_THRESHOLD,
             blur_downscale_threshold: BLUR_DOWNSCALE_THRESHOLD,
             // Retained-mode (Figma-style per-top-level-shape texture
-            // cache) is ON by default: drag/resize/rotate become
-            // pure canvas transforms over cached textures and
-            // pan/zoom reuses those same textures instead of going
-            // through the tile atlas pipeline. Set to `false` or
-            // call `set_retained_mode_enabled(false)` to fall back to
-            // the legacy tile pipeline for A/B comparisons.
-            retained_mode: true,
+            // cache) is OFF by default: the tile + atlas pipeline
+            // owns the render loop and we accelerate edits through
+            // `leaf_cache` instead, which blits cached textures for
+            // leaf shapes from inside the tile walker. Retained mode
+            // is still available for A/B comparisons via
+            // `set_retained_mode(true)`.
+            retained_mode: false,
+            // Per-leaf texture cache is ON by default: while the tile
+            // walker traverses the scene it blits the cached texture
+            // of any leaf shape instead of re-rasterizing it,
+            // dramatically cutting the cost of repeated frames during
+            // edits.
+            leaf_cache: true,
         }
     }
 }
@@ -99,6 +115,16 @@ impl RenderOptions {
 
     pub fn set_retained_mode(&mut self, enabled: bool) {
         self.retained_mode = enabled;
+    }
+
+    /// Returns `true` when the per-leaf texture cache should be
+    /// consulted by the tile walker.
+    pub fn is_leaf_cache(&self) -> bool {
+        self.leaf_cache
+    }
+
+    pub fn set_leaf_cache(&mut self, enabled: bool) {
+        self.leaf_cache = enabled;
     }
 
     /// True only when the viewport is the one being moved (pan/zoom)
