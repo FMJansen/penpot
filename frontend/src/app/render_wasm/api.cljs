@@ -1575,10 +1575,17 @@
 
 (def ^:private default-context-options
   #js {:antialias false
-       :depth true
+       ;; Depth is not needed for 2D canvas rendering and can add driver work.
+       :depth false
        :stencil true
        :alpha true
-       "preserveDrawingBuffer" true})
+       ;; Preserving the drawing buffer forces extra GPU/driver work and can
+       ;; stall every frame; we re-render explicitly so it is unnecessary for
+       ;; the viewport and hurts FPS during interactions like drag.
+       "preserveDrawingBuffer" false
+       ;; Hint the browser/ANGLE to reduce compositor-induced stalls.
+       "desynchronized" true
+       "powerPreference" "high-performance"})
 
 (defn resize-viewbox
   [width height]

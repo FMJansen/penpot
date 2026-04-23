@@ -1768,6 +1768,7 @@ impl RenderState {
 
         performance::end_measure!("start_render_loop");
         performance::end_timed_log!("start_render_loop", _start);
+
         Ok(())
     }
 
@@ -1826,7 +1827,12 @@ impl RenderState {
             // still need to flush every rAF so the user sees the updated
             // shape position — render_from_cache is not in the loop here.
             if !self.options.is_viewport_interaction() {
-                self.flush_and_submit();
+                // self.gpu_state.context.flush_and_submit();
+                if self.options.is_interactive_transform() {
+                    self.gpu_state.context.flush_and_submit();
+                } else {
+                    self.flush_and_submit();
+                }                
             } else {
                 self.gpu_state.context.flush_and_submit();
             }
