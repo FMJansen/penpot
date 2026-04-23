@@ -297,6 +297,12 @@ impl PendingTiles {
         self.list.extend(visible_cached);
     }
 
+    pub fn has_visible_uncached(&self, tile_viewbox: &TileViewbox, surfaces: &Surfaces) -> bool {
+        self.list.iter().any(|tile| {
+            tile_viewbox.visible_rect.contains(tile) && !surfaces.has_cached_tile_surface(*tile)
+        })
+    }
+
     pub fn pop(&mut self) -> Option<Tile> {
         self.list.pop()
     }

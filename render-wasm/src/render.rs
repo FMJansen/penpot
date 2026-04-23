@@ -337,6 +337,16 @@ pub(crate) struct RenderState {
     /// Per-gesture cache of recorded draw commands for leaf shapes.
     /// Used to speed up interactive transforms by replaying commands with a modifier matrix.
     picture_cache: HashMap<Uuid, skia::Picture>,
+    /// Per-gesture cache of rasterized leaf shapes for interactive transforms.
+    /// Capture once, then blit each frame with the modifier matrix applied.
+    texture_cache: HashMap<Uuid, CachedTexture>,
+}
+
+#[derive(Clone)]
+struct CachedTexture {
+    image: skia::Image,
+    source_doc_rect: skia::Rect,
+    captured_scale: f32,
 }
 
 pub fn get_cache_size(viewbox: Viewbox, scale: f32, interest: i32) -> skia::ISize {
@@ -411,11 +421,16 @@ impl RenderState {
             export_context: None,
             cache_cleared_this_render: false,
             picture_cache: HashMap::new(),
+            texture_cache: HashMap::new(),
         })
     }
 
     pub fn clear_picture_cache(&mut self) {
         self.picture_cache.clear();
+    }
+
+    pub fn clear_texture_cache(&mut self) {
+        self.texture_cache.clear();
     }
 
     /// Combines every visible layer blur currently active (ancestors + shape)
@@ -1689,7 +1704,6 @@ impl RenderState {
         // to clamp atlas updates. This prevents zoom-out tiles from forcing atlas
         // growth far beyond real content.
         let doc_bounds = self.compute_document_bounds(base_object, tree);
-        self.surfaces.set_atlas_doc_bounds(doc_bounds);
 
         // During an interactive shape transform (drag/resize/rotate) the
         // Target is repainted tile-by-tile. If only a subset of the
@@ -1700,7 +1714,12 @@ impl RenderState {
         // 1:1 atlas as a stable backdrop so every flush presents a
         // coherent picture: unchanged tiles come from the atlas and
         // invalidated tiles are overwritten on top as they finish.
-        if self.options.is_interactive_transform() && self.surfaces.has_atlas() {
+        if self.options.is_interactive_transform()
+            && self.surfaces.has_atlas()
+            // Drawing the whole atlas every rAF is expensive. Only do it when we expect
+            // visible uncached tiles (otherwise we already have stable content in cached tiles).
+            && self.pending_tiles.has_visible_uncached(&self.tile_viewbox, &self.surfaces)
+        {
             self.surfaces.draw_atlas_to_target(
                 self.viewbox,
                 self.options.dpr(),
@@ -1746,6 +1765,103 @@ impl RenderState {
             .update(&self.tile_viewbox, &self.surfaces);
         performance::end_measure!("tile_cache");
         performance::end_timed_log!("tile_cache_update", _tile_start);
+
+        // Fast-path for interactive transforms:
+        // If every visible tile is already cached, avoid the tile-walker entirely and just
+        // present a stable backdrop plus the transformed selection overlay.
+        //
+        // This prevents per-frame blits of dozens of cached tiles (and other walker overhead),
+        // which can tank FPS even in simple documents.
+        if self.options.is_interactive_transform()
+            && self.surfaces.has_atlas()
+            && !self.pending_tiles.has_visible_uncached(&self.tile_viewbox, &self.surfaces)
+        {
+            // Backdrop.
+            self.surfaces.draw_atlas_to_target(
+                self.viewbox,
+                self.options.dpr(),
+                self.background_color,
+            );
+
+            // Overlay: currently only the "simple rect + solid fill" texture path.
+            let mut ok = true;
+            let modifier_ids = tree.modifier_ids();
+            for id in modifier_ids.iter() {
+                let (Some(modifier), Some(base_shape)) = (tree.get_modifier(id), tree.get_base(id))
+                else {
+                    continue;
+                };
+
+                let eligible = !base_shape.is_recursive()
+                    && base_shape.transform.is_identity()
+                    && base_shape.opacity() == 1.0
+                    && base_shape.shadows.is_empty()
+                    && base_shape.blur.is_none()
+                    && base_shape.strokes.is_empty()
+                    && matches!(base_shape.shape_type, Type::Rect(_))
+                    && base_shape.fills.len() == 1
+                    && matches!(base_shape.fills[0], Fill::Solid(_));
+                if !eligible {
+                    ok = false;
+                    break;
+                }
+
+                let antialias = base_shape.should_use_antialias(
+                    self.get_scale(),
+                    self.options.antialias_threshold,
+                );
+                let Some(tex) = self.get_or_capture_simple_rect_texture(
+                    id,
+                    base_shape,
+                    &base_shape.fills[0],
+                    antialias,
+                ) else {
+                    ok = false;
+                    break;
+                };
+
+                let scale = self.get_scale();
+                let translation = self
+                    .surfaces
+                    .get_render_context_translation(self.render_area, scale);
+                let dst = tex.source_doc_rect;
+                let image = tex.image.clone();
+                let src = skia::Rect::from_xywh(
+                    0.0,
+                    0.0,
+                    image.width() as f32,
+                    image.height() as f32,
+                );
+                let sampling = self.sampling_options;
+                self.surfaces.apply_mut(SurfaceId::Target as u32, |s| {
+                    let canvas = s.canvas();
+                    canvas.save();
+                    canvas.scale((scale, scale));
+                    canvas.translate(translation);
+                    canvas.concat(modifier);
+                    canvas.draw_image_rect_with_sampling_options(
+                        &image,
+                        Some((&src, skia::canvas::SrcRectConstraint::Strict)),
+                        dst,
+                        sampling,
+                        &skia::Paint::default(),
+                    );
+                    canvas.restore();
+                });
+            }
+
+            if ok {
+                if self.options.is_debug_visible() {
+                    debug::render(self);
+                }
+                ui::render(self, tree);
+                debug::render_wasm_label(self);
+                self.flush_and_submit();
+                performance::end_measure!("start_render_loop");
+                performance::end_timed_log!("start_render_loop", _start);
+                return Ok(());
+            }
+        }
 
         self.pending_nodes.clear();
         if self.pending_nodes.capacity() < tree.len() {
@@ -1809,6 +1925,49 @@ impl RenderState {
 
         self.picture_cache.insert(*shape_id, picture.clone());
         Some(picture)
+    }
+
+    fn get_or_capture_simple_rect_texture(
+        &mut self,
+        shape_id: &Uuid,
+        base_shape: &Shape,
+        fill: &Fill,
+        antialias: bool,
+    ) -> Option<CachedTexture> {
+        if let Some(entry) = self.texture_cache.get(shape_id) {
+
+            return Some(entry.clone());
+        }
+
+        let scale = self.get_scale();
+        let bounds = base_shape.selrect();
+        if bounds.is_empty() || scale <= 0.0 {
+            return None;
+        }
+
+        // Render into Export surface in pixel space, drawing in document coords scaled by `scale`.
+        self.surfaces.resize_export_surface(scale, bounds);
+        let canvas = self.surfaces.canvas(SurfaceId::Export);
+        canvas.clear(skia::Color::TRANSPARENT);
+        canvas.save();
+        canvas.scale((scale, scale));
+        canvas.translate((-bounds.left, -bounds.top));
+        let paint = fill.to_paint(&bounds, antialias);
+        canvas.draw_rect(bounds, &paint);
+        canvas.restore();
+
+        self.surfaces
+            .flush_and_submit(&mut self.gpu_state, SurfaceId::Export);
+        let image = self.surfaces.snapshot(SurfaceId::Export);
+
+        let entry = CachedTexture {
+            image,
+            source_doc_rect: bounds,
+            captured_scale: scale,
+        };
+        self.texture_cache.insert(*shape_id, entry.clone());
+
+        Some(entry)
     }
 
     fn compute_document_bounds(
@@ -2006,18 +2165,6 @@ impl RenderState {
         }
         if performance::get_time() - timestamp <= self.options.max_blocking_time_ms {
             return false;
-        }
-
-        // During interactive shape transforms we must complete every
-        // visible tile in a single rAF so the user never sees tiles
-        // popping in sequentially. Only yield once all visible work is
-        // done and we are processing the interest-area pre-render.
-        if self.options.is_interactive_transform() {
-            if let Some(tile) = self.current_tile {
-                if self.tile_viewbox.is_visible(&tile) {
-                    return false;
-                }
-            }
         }
 
         true
@@ -2816,9 +2963,9 @@ impl RenderState {
                         .draw_into(SurfaceId::DropShadows, target_surface, None);
                 }
 
-                // Interactive-transform fast path: replay a recorded Picture for very simple
-                // leaf rects, applying only the modifier matrix per frame.
-                let mut rendered_via_picture = false;
+                // Interactive-transform fast path: replay a recorded Picture or blit a cached
+                // texture for very simple leaf rects, applying only the modifier matrix per frame.
+                let mut rendered_fast = false;
                 if self.options.is_interactive_transform()
                     && !element.is_recursive()
                     && clip_bounds.is_none()
@@ -2843,13 +2990,50 @@ impl RenderState {
                                 self.get_scale(),
                                 self.options.antialias_threshold,
                             );
-                            if let Some(picture) = self.get_or_record_simple_rect_picture(
+
+                            // Prefer texture blit (raster) over picture replay during drag.
+                            if let Some(tex) = self.get_or_capture_simple_rect_texture(
                                 &node_id,
                                 base_shape,
                                 &base_shape.fills[0],
                                 antialias,
                             ) {
-                                println!("draw picture");
+                                let scale = self.get_scale();
+                                let translation = self
+                                    .surfaces
+                                    .get_render_context_translation(self.render_area, scale);
+                                let dst = tex.source_doc_rect;
+                                let image = tex.image.clone();
+                                let src = skia::Rect::from_xywh(
+                                    0.0,
+                                    0.0,
+                                    image.width() as f32,
+                                    image.height() as f32,
+                                );
+                                let sampling = self.sampling_options;
+                                self.surfaces.apply_mut(target_surface as u32, |s| {
+                                    let canvas = s.canvas();
+                                    canvas.save();
+                                    canvas.scale((scale, scale));
+                                    canvas.translate(translation);
+                                    canvas.concat(modifier);
+                                    canvas.draw_image_rect_with_sampling_options(
+                                        &image,
+                                        Some((&src, skia::canvas::SrcRectConstraint::Strict)),
+                                        dst,
+                                        sampling,
+                                        &skia::Paint::default(),
+                                    );
+                                    canvas.restore();
+                                });
+                                rendered_fast = true;
+                            } else if let Some(picture) = self.get_or_record_simple_rect_picture(
+                                &node_id,
+                                base_shape,
+                                &base_shape.fills[0],
+                                antialias,
+                            ) {
+
                                 let picture = picture.clone();
                                 let scale = self.get_scale();
                                 let translation = self
@@ -2864,14 +3048,14 @@ impl RenderState {
                                     canvas.draw_picture(&picture, None, None);
                                     canvas.restore();
                                 });
-                                rendered_via_picture = true;
+                                rendered_fast = true;
                             }
                         }
                     }
                 }
 
-                if !rendered_via_picture {
-                    println!("render_shape");
+                if !rendered_fast {
+
                     self.render_shape(
                         element,
                         clip_bounds.clone(),

@@ -191,6 +191,17 @@ impl ShapesPoolImpl {
         self.modifiers.get(&idx)
     }
 
+    /// Returns the list of UUIDs that currently have a modifier applied.
+    pub fn modifier_ids(&self) -> Vec<Uuid> {
+        if self.modifiers.is_empty() {
+            return Vec::new();
+        }
+        self.uuid_to_idx
+            .iter()
+            .filter_map(|(uuid, idx)| self.modifiers.contains_key(idx).then_some(*uuid))
+            .collect()
+    }
+
     // Given an id, returns the depth in the tree-shaped structure
     // of shapes.
     pub fn get_depth(&self, id: &Uuid) -> usize {

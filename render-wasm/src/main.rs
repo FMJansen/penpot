@@ -457,6 +457,7 @@ pub extern "C" fn set_modifiers_start() -> Result<()> {
         opts.set_fast_mode(true);
         opts.set_interactive_transform(true);
         state.render_state.clear_picture_cache();
+        state.render_state.clear_texture_cache();
         performance::end_measure!("set_modifiers_start");
     });
     Ok(())
@@ -475,6 +476,7 @@ pub extern "C" fn set_modifiers_end() -> Result<()> {
         opts.set_fast_mode(false);
         opts.set_interactive_transform(false);
         state.render_state.clear_picture_cache();
+        state.render_state.clear_texture_cache();
         state.render_state.cancel_animation_frame();
         performance::end_measure!("set_modifiers_end");
     });
@@ -975,7 +977,16 @@ pub extern "C" fn set_modifiers() -> Result<()> {
 
     with_state_mut!(state, {
         state.set_modifiers(modifiers);
-        state.rebuild_modifier_tiles(ids)?;
+        // During interactive transforms (drag/resize/rotate) `set_modifiers` can be called
+        // every frame. Rebuilding tiles here invalidates cached tiles continuously and can
+        // dominate frame time even for very simple scenes.
+        //
+        // Instead, keep the tile cache stable during the gesture and let the drag fast-path
+        // (overlay/texture/picture) handle the moving visuals. A final full-quality render
+        // after `set_modifiers_end` + commit will rebuild tiles as needed.
+        if !state.render_state.options.is_interactive_transform() {
+            state.rebuild_modifier_tiles(ids)?;
+        }
     });
     Ok(())
 }
