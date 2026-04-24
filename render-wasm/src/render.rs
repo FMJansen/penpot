@@ -334,6 +334,11 @@ pub(crate) struct RenderState {
     /// Cleared at the beginning of a render pass; set to true after we clear Cache the first
     /// time we are about to blit a tile into Cache for this pass.
     pub cache_cleared_this_render: bool,
+
+    /// Present/backpressure state to avoid enqueuing GPU work when the driver is blocked.
+    pub last_present_ms: i32,
+    pub last_submit_dt_ms: i32,
+    pub gpu_backpressure_until_ms: i32,
 }
 
 pub fn get_cache_size(viewbox: Viewbox, scale: f32, interest: i32) -> skia::ISize {
@@ -407,6 +412,9 @@ impl RenderState {
             preview_mode: false,
             export_context: None,
             cache_cleared_this_render: false,
+            last_present_ms: 0,
+            last_submit_dt_ms: 33,
+            gpu_backpressure_until_ms: 0,
         })
     }
 
@@ -1811,6 +1819,28 @@ impl RenderState {
     ) -> Result<()> {
         performance::begin_measure!("process_animation_frame");
         if self.render_in_progress {
+            let now0 = performance::get_time();
+            if now0 < self.gpu_backpressure_until_ms {
+                self.cancel_animation_frame();
+                self.render_request_id = Some(wapi::request_animation_frame!());
+                performance::end_measure!("process_animation_frame");
+                return Ok(());
+            }
+
+            // Key idea: during interactive transforms / viewport interactions,
+            // only enqueue GPU work in frames where we'll actually submit/present.
+            let min_interval_ms = self.last_submit_dt_ms.clamp(33, 200);
+            let should_submit_now = now0 - self.last_present_ms >= min_interval_ms;
+            // if (self.options.is_interactive_transform() || self.options.is_viewport_interaction())
+            //     && !should_submit_now
+            if !should_submit_now
+            {
+                self.cancel_animation_frame();
+                self.render_request_id = Some(wapi::request_animation_frame!());
+                performance::end_measure!("process_animation_frame");
+                return Ok(());
+            }
+
             if tree.len() != 0 {
                 self.render_shape_tree_partial(base_object, tree, timestamp, true)?;
             }
@@ -1829,12 +1859,35 @@ impl RenderState {
             if !self.options.is_viewport_interaction() {
                 // self.gpu_state.context.flush_and_submit();
                 if self.options.is_interactive_transform() {
+                    let t0 = performance::get_time();
                     self.gpu_state.context.flush_and_submit();
+                    let dt = performance::get_time() - t0;
+                    self.last_submit_dt_ms = dt;
+                    self.last_present_ms = performance::get_time();
+                    if dt > 16 {
+                        self.gpu_backpressure_until_ms =
+                            self.last_present_ms + (dt - 16).min(200);
+                    }
                 } else {
+                    let t0 = performance::get_time();
                     self.flush_and_submit();
+                    let dt = performance::get_time() - t0;
+                    self.last_submit_dt_ms = dt;
+                    self.last_present_ms = performance::get_time();
+                    if dt > 16 {
+                        self.gpu_backpressure_until_ms =
+                            self.last_present_ms + (dt - 16).min(200);
+                    }
                 }                
             } else {
+                let t0 = performance::get_time();
                 self.gpu_state.context.flush_and_submit();
+                let dt = performance::get_time() - t0;
+                self.last_submit_dt_ms = dt;
+                self.last_present_ms = performance::get_time();
+                if dt > 16 {
+                    self.gpu_backpressure_until_ms = self.last_present_ms + (dt - 16).min(200);
+                }
             }
 
             if self.render_in_progress {
