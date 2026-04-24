@@ -136,6 +136,7 @@
 - Fix plugin API `ShapeBase.component()` returning the outermost component instead of the immediate component in case of nested component instances [Github #9183](https://github.com/penpot/penpot/issues/9183)
 - Fix missing `labels.open` translation that surfaced the raw key as the typography font open-button `aria-label`, breaking screen-reader output (by @MilosM348)
 - Fix plugin API `shape.fills` and `shape.strokes` arrays being read-only [Github #8357](https://github.com/penpot/penpot/issues/8357)
+- Fix file crashing when switching a variant [Taiga #14014](https://tree.taiga.io/project/penpot/issue/14014)
 
 
 ## 2.15.0 (Unreleased)
