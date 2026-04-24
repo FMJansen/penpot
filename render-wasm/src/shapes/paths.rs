@@ -1,7 +1,6 @@
-use skia_safe::{self as skia, Matrix};
-
 use crate::math;
 use crate::shapes::svg_attrs::{FillRule, SvgAttrs};
+use skia_safe::{self as skia, Matrix};
 
 mod subpaths;
 
@@ -20,7 +19,7 @@ impl Segment {}
 #[derive(Debug, Clone, PartialEq)]
 pub struct Path {
     segments: Vec<Segment>,
-    skia_path: skia::Path,
+    pub skia_path: skia::Path,
     open: bool,
 }
 
