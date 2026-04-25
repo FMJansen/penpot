@@ -128,6 +128,10 @@ impl State {
             .start_render_loop(None, &self.shapes, timestamp, false)
     }
 
+    pub fn render_simple(&mut self) -> Result<()> {
+        self.render_state.render_simple(&self.shapes)
+    }
+
     pub fn process_animation_frame(&mut self, timestamp: i32) -> Result<()> {
         self.render_state
             .process_animation_frame(None, &self.shapes, timestamp)

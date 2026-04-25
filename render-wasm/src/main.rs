@@ -224,9 +224,9 @@ pub extern "C" fn set_canvas_background(raw_color: u32) -> Result<()> {
 #[wasm_error]
 pub extern "C" fn render(_: i32) -> Result<()> {
     with_state_mut!(state, {
-        state.rebuild_touched_tiles();
+        // state.rebuild_touched_tiles();
         state
-            .start_render_loop(performance::get_time())
+            .render_simple()
             .map_err(|_| Error::RecoverableError("Error rendering".to_string()))?;
     });
     Ok(())

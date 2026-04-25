@@ -14,6 +14,8 @@ pub mod text_editor;
 mod ui;
 
 use skia_safe::{self as skia, Matrix, RRect, Rect};
+use skia_safe::gpu::{SyncCpu};
+
 use std::borrow::Cow;
 use std::collections::HashSet;
 
@@ -1652,6 +1654,33 @@ impl RenderState {
         performance::end_measure!("render_preview");
         performance::end_timed_log!("render_preview", _start);
 
+        Ok(())
+    }
+
+    pub fn render_simple(
+        &mut self,
+        tree: ShapesPoolRef,
+    ) -> Result<()> {
+        self.reset_canvas();
+
+        let scale = self.get_scale();
+
+        let canvas = self.surfaces.canvas(SurfaceId::Target);
+        canvas.reset_matrix();
+        canvas.scale((scale, scale));
+        canvas.translate((-self.viewbox.area.left * scale, -self.viewbox.area.top * scale));
+        canvas.clear(self.background_color);
+        let mut p = skia::Paint::default();
+        p.set_color(skia::Color::RED);
+        
+        if let Some(root) = tree.get(&Uuid::nil()) {
+            for id in root.children_ids(false).iter() {
+                let Some(element) = tree.get(id) else { continue };
+                canvas.draw_rect(skia::Rect::from_xywh(element.selrect().x(), element.selrect().y(), element.selrect().width(), element.selrect().height()), &p);
+            }
+        }
+        self.gpu_state.context.flush_and_submit_surface(self.surfaces.get_mut(SurfaceId::Target), SyncCpu::No);
+        wapi::notify_tiles_render_complete!();
         Ok(())
     }
 

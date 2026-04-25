@@ -1571,10 +1571,12 @@
 
 (def ^:private default-context-options
   #js {:antialias false
-       :depth true
-       :stencil true
-       :alpha true
-       "preserveDrawingBuffer" true})
+       :depth false
+       :stencil false
+       :alpha false
+       "preserveDrawingBuffer" false
+       "powerPreference" "high-performance"
+       "desynchronized" true})
 
 (defn resize-viewbox
   [width height]
