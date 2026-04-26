@@ -1665,21 +1665,53 @@ impl RenderState {
 
         let scale = self.get_scale();
 
-        let canvas = self.surfaces.canvas(SurfaceId::Target);
-        canvas.reset_matrix();
-        canvas.scale((scale, scale));
-        canvas.translate((-self.viewbox.area.left * scale, -self.viewbox.area.top * scale));
-        canvas.clear(self.background_color);
-        let mut p = skia::Paint::default();
-        p.set_color(skia::Color::RED);
-        
+        // Apply viewport transform (doc -> screen) without margin compensation.
+        let translation = (-self.viewbox.area.left, -self.viewbox.area.top);
+        let surface_ids = SurfaceId::Fills as u32
+            | SurfaceId::Strokes as u32
+            | SurfaceId::InnerShadows as u32
+            | SurfaceId::TextDropShadows as u32
+            | SurfaceId::DropShadows as u32;
+        self.surfaces.apply_mut(surface_ids, |s| {
+            let canvas = s.canvas();
+            canvas.reset_matrix();
+            canvas.clear(skia::Color::TRANSPARENT);
+            canvas.scale((scale, scale));
+            canvas.translate(translation);
+        });
+
+        // Clear target (device space).
+        {
+            let canvas = self.surfaces.canvas(SurfaceId::Target);
+            canvas.reset_matrix();
+            canvas.clear(self.background_color);
+        }
+
+        // Render shapes via the normal shape pipeline (into intermediate surfaces).
         if let Some(root) = tree.get(&Uuid::nil()) {
             for id in root.children_ids(false).iter() {
                 let Some(element) = tree.get(id) else { continue };
-                canvas.draw_rect(skia::Rect::from_xywh(element.selrect().x(), element.selrect().y(), element.selrect().width(), element.selrect().height()), &p);
+                self.render_shape(
+                    element,
+                    None,
+                    SurfaceId::Fills,
+                    SurfaceId::Strokes,
+                    SurfaceId::InnerShadows,
+                    SurfaceId::TextDropShadows,
+                    false,
+                    None,
+                    None,
+                    None,
+                    SurfaceId::Target,
+                )?;
             }
         }
-        self.gpu_state.context.flush_and_submit_surface(self.surfaces.get_mut(SurfaceId::Target), SyncCpu::No);
+
+        // Composite the intermediate surfaces to Target (same as the real pipeline).
+        self.apply_drawing_to_render_canvas(None, SurfaceId::Target);
+
+        // Present.
+        self.flush_and_submit();
         wapi::notify_tiles_render_complete!();
         Ok(())
     }
