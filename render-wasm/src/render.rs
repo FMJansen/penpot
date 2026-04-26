@@ -1716,6 +1716,58 @@ impl RenderState {
         Ok(())
     }
 
+    /// Alternate simplified renderer that draws directly into `Target` (viewport-sized surface),
+    /// avoiding any dependence on tile-sized intermediate surfaces (which can look "cut").
+    ///
+    /// Useful for drag performance experiments where we want the minimal GPU workload.
+    pub fn render_simple_direct_target(
+        &mut self,
+        tree: ShapesPoolRef,
+    ) -> Result<()> {
+        self.reset_canvas();
+
+        let scale = self.get_scale();
+        let translation = (-self.viewbox.area.left, -self.viewbox.area.top);
+
+        // Disable culling for this simplified path.
+        self.current_tile = None;
+        self.render_area = self.viewbox.area;
+        self.render_area_with_margins = skia::Rect::from_ltrb(-1.0e9, -1.0e9, 1.0e9, 1.0e9);
+
+        // Prepare Target with viewport transform.
+        {
+            let canvas = self.surfaces.canvas(SurfaceId::Target);
+            canvas.reset_matrix();
+            canvas.clear(self.background_color);
+            canvas.scale((scale, scale));
+            canvas.translate(translation);
+        }
+
+        if let Some(root) = tree.get(&Uuid::nil()) {
+            for id in root.children_ids(false).iter() {
+                let Some(element) = tree.get(id) else { continue };
+                // Use Target as every layer surface.
+                self.render_shape(
+                    element,
+                    None,
+                    SurfaceId::Target,
+                    SurfaceId::Target,
+                    SurfaceId::Target,
+                    SurfaceId::Target,
+                    false,
+                    None,
+                    None,
+                    None,
+                    SurfaceId::Target,
+                )?;
+            }
+        }
+
+        self.flush_and_submit();
+        wapi::notify_tiles_render_complete!();
+        Ok(())
+    }
+
     pub fn start_render_loop(
         &mut self,
         base_object: Option<&Uuid>,
