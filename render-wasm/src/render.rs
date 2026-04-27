@@ -885,6 +885,7 @@ impl RenderState {
             && self.nested_blurs.iter().flatten().any(|blur| {
                 !blur.hidden && blur.blur_type == BlurType::LayerBlur && blur.value > 0.0
             });
+
         let can_render_directly = apply_to_current_surface
             && clip_bounds.is_none()
             && offset.is_none()
@@ -1726,6 +1727,12 @@ impl RenderState {
         if let Some(root) = tree.get(&Uuid::nil()) {
             for id in root.children_ids(false).iter() {
                 let Some(element) = tree.get(id) else { continue };
+                // `render_shape(..., apply_to_current_surface=true)` composites based on dirty flags.
+                // Mark the intermediate surfaces as dirty so the composite pass actually blits.
+                self.surfaces.mark_dirty(SurfaceId::Fills);
+                self.surfaces.mark_dirty(SurfaceId::Strokes);
+                self.surfaces.mark_dirty(SurfaceId::InnerShadows);
+                self.surfaces.mark_dirty(SurfaceId::TextDropShadows);
                 self.render_shape(
                     element,
                     None,
@@ -1733,7 +1740,7 @@ impl RenderState {
                     SurfaceId::Strokes,
                     SurfaceId::InnerShadows,
                     SurfaceId::TextDropShadows,
-                    false,
+                    true,
                     None,
                     None,
                     None,
@@ -1741,9 +1748,6 @@ impl RenderState {
                 )?;
             }
         }
-
-        // Composite the intermediate surfaces to Target (same as the real pipeline).
-        self.apply_drawing_to_render_canvas(None, SurfaceId::Target);
 
         // Present.
         self.flush_and_submit();

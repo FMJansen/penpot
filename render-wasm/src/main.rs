@@ -225,8 +225,8 @@ pub extern "C" fn set_canvas_background(raw_color: u32) -> Result<()> {
 pub extern "C" fn render(_: i32) -> Result<()> {
     with_state_mut!(state, {
         // state.rebuild_touched_tiles();
-        let iters: i32 = 10;
-        let frames: i32 = 300;
+        let iters: i32 = 100;
+        let frames: i32 = 30;
         let step_px: f32 = 1.0;
         let mut sum0: f32 = 0.0;
         let mut sum1: f32 = 0.0;
