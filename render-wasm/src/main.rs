@@ -225,9 +225,30 @@ pub extern "C" fn set_canvas_background(raw_color: u32) -> Result<()> {
 pub extern "C" fn render(_: i32) -> Result<()> {
     with_state_mut!(state, {
         // state.rebuild_touched_tiles();
-        state
-            .render_simple()
-            .map_err(|_| Error::RecoverableError("Error rendering".to_string()))?;
+        let iters: i32 = 10;
+        let frames: i32 = 300;
+        let step_px: f32 = 1.0;
+        let mut sum0: f32 = 0.0;
+        let mut sum1: f32 = 0.0;
+        let mut sum2: f32 = 0.0;
+        for _ in 0..iters {
+            sum0 += state
+                .bench_drag_render_simple(0, frames, step_px)
+                .map_err(|e| Error::RecoverableError(e.to_string()))?;
+            sum1 += state
+                .bench_drag_render_simple(1, frames, step_px)
+                .map_err(|e| Error::RecoverableError(e.to_string()))?;
+            sum2 += state
+                .bench_drag_render_simple(2, frames, step_px)
+                .map_err(|e| Error::RecoverableError(e.to_string()))?;
+        }
+        let avg0 = sum0 / iters as f32;
+        let avg1 = sum1 / iters as f32;
+        let avg2 = sum2 / iters as f32;
+        
+        println!("mode0(target)={:.1}", avg0);
+        println!("mode1(render_shape_layers)={:.1}", avg1);
+        println!("mode2(render_shape_target)={:.1}", avg2);
     });
     Ok(())
 }
@@ -242,6 +263,24 @@ pub extern "C" fn render_sync() -> Result<()> {
             .map_err(|_| Error::RecoverableError("Error rendering".to_string()))?;
     });
     Ok(())
+}
+
+/// Benchmark helper: simulates dragging by applying an extra offset each frame
+/// and runs one of the `render_simple_*` paths.
+///
+/// mode:
+///   0 = render_simple_target (direct draw_rect)
+///   1 = render_simple_render_shape (render_shape into layers + compose)
+///   2 = render_simple_render_shape_target (render_shape directly into Target)
+#[no_mangle]
+#[wasm_error]
+pub extern "C" fn bench_drag_render_simple(mode: i32, frames: i32, step_px: f32) -> Result<f32> {
+    let fps = with_state_mut!(state, {
+        state
+            .bench_drag_render_simple(mode, frames, step_px)
+            .map_err(|e| Error::RecoverableError(e.to_string()))?
+    });
+    Ok(fps)
 }
 
 #[no_mangle]

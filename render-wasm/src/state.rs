@@ -128,8 +128,48 @@ impl State {
             .start_render_loop(None, &self.shapes, timestamp, false)
     }
 
-    pub fn render_simple(&mut self) -> Result<()> {
-        self.render_state.render_simple(&self.shapes)
+    pub fn render_simple_target(&mut self) -> Result<()> {
+        self.render_state.render_simple_target(&self.shapes)
+    }
+
+    pub fn render_simple_render_shape(&mut self) -> Result<()> {
+        self.render_state.render_simple_render_shape(&self.shapes)
+    }
+
+    pub fn render_simple_render_shape_target(&mut self) -> Result<()> {
+        self.render_state.render_simple_render_shape_target(&self.shapes)
+    }
+
+    pub fn bench_drag_render_simple(
+        &mut self,
+        mode: i32,
+        frames: i32,
+        step_px: f32,
+    ) -> Result<f32> {
+        let frames = frames.max(1);
+        let mut sum_ms: f64 = 0.0;
+        let mut max_ms: f64 = 0.0;
+
+        for i in 0..frames {
+            self.render_state.bench_drag_offset = (i as f32 * step_px, 0.0);
+            let t0 = crate::performance::get_time() as f64;
+            match mode {
+                0 => self.render_simple_target()?,
+                1 => self.render_simple_render_shape()?,
+                2 => self.render_simple_render_shape_target()?,
+                _ => return Err(crate::error::Error::RecoverableError("unknown mode".to_string())),
+            }
+            let dt = (crate::performance::get_time() as f64) - t0;
+            sum_ms += dt;
+            if dt > max_ms {
+                max_ms = dt;
+            }
+        }
+
+        let avg = sum_ms / frames as f64;
+        let fps = if avg > 0.0 { 1000.0 / avg } else { 0.0 };
+        let _ = max_ms; // keep for easy debugging locally
+        Ok(fps as f32)
     }
 
     pub fn process_animation_frame(&mut self, timestamp: i32) -> Result<()> {

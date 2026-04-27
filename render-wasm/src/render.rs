@@ -336,6 +336,10 @@ pub(crate) struct RenderState {
     /// Cleared at the beginning of a render pass; set to true after we clear Cache the first
     /// time we are about to blit a tile into Cache for this pass.
     pub cache_cleared_this_render: bool,
+
+    /// Benchmark-only: extra translation applied during `render_simple_*`
+    /// to simulate dragging a shape (in document units).
+    pub bench_drag_offset: (f32, f32),
 }
 
 pub fn get_cache_size(viewbox: Viewbox, scale: f32, interest: i32) -> skia::ISize {
@@ -409,6 +413,7 @@ impl RenderState {
             preview_mode: false,
             export_context: None,
             cache_cleared_this_render: false,
+            bench_drag_offset: (0.0, 0.0),
         })
     }
 
@@ -1657,7 +1662,35 @@ impl RenderState {
         Ok(())
     }
 
-    pub fn render_simple(
+    pub fn render_simple_target(
+        &mut self,
+        tree: ShapesPoolRef,
+    ) -> Result<()> {
+        self.reset_canvas();
+
+        let scale = self.get_scale();
+        let (dx, dy) = self.bench_drag_offset;
+
+        let canvas = self.surfaces.canvas(SurfaceId::Target);
+        canvas.reset_matrix();
+        canvas.scale((scale, scale));
+        canvas.translate((-self.viewbox.area.left + dx, -self.viewbox.area.top + dy));
+        canvas.clear(self.background_color);
+        let mut p = skia::Paint::default();
+        p.set_color(skia::Color::RED);
+        
+        if let Some(root) = tree.get(&Uuid::nil()) {
+            for id in root.children_ids(false).iter() {
+                let Some(element) = tree.get(id) else { continue };
+                canvas.draw_rect(skia::Rect::from_xywh(element.selrect().x(), element.selrect().y(), element.selrect().width(), element.selrect().height()), &p);
+            }
+        }
+        self.gpu_state.context.flush_and_submit_surface(self.surfaces.get_mut(SurfaceId::Target), SyncCpu::No);
+        wapi::notify_tiles_render_complete!();
+        Ok(())
+    }
+
+    pub fn render_simple_render_shape(
         &mut self,
         tree: ShapesPoolRef,
     ) -> Result<()> {
@@ -1666,12 +1699,14 @@ impl RenderState {
         let scale = self.get_scale();
 
         // Apply viewport transform (doc -> screen) without margin compensation.
-        let translation = (-self.viewbox.area.left, -self.viewbox.area.top);
+        let (dx, dy) = self.bench_drag_offset;
+        let translation = (-self.viewbox.area.left + dx, -self.viewbox.area.top + dy);
         let surface_ids = SurfaceId::Fills as u32
             | SurfaceId::Strokes as u32
             | SurfaceId::InnerShadows as u32
             | SurfaceId::TextDropShadows as u32
-            | SurfaceId::DropShadows as u32;
+            | SurfaceId::DropShadows as u32
+            ;
         self.surfaces.apply_mut(surface_ids, |s| {
             let canvas = s.canvas();
             canvas.reset_matrix();
@@ -1716,18 +1751,15 @@ impl RenderState {
         Ok(())
     }
 
-    /// Alternate simplified renderer that draws directly into `Target` (viewport-sized surface),
-    /// avoiding any dependence on tile-sized intermediate surfaces (which can look "cut").
-    ///
-    /// Useful for drag performance experiments where we want the minimal GPU workload.
-    pub fn render_simple_direct_target(
+    pub fn render_simple_render_shape_target(
         &mut self,
         tree: ShapesPoolRef,
     ) -> Result<()> {
         self.reset_canvas();
 
         let scale = self.get_scale();
-        let translation = (-self.viewbox.area.left, -self.viewbox.area.top);
+        let (dx, dy) = self.bench_drag_offset;
+        let translation = (-self.viewbox.area.left + dx, -self.viewbox.area.top + dy);
 
         // Disable culling for this simplified path.
         self.current_tile = None;
