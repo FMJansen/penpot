@@ -3,7 +3,7 @@ use crate::performance;
 use crate::shapes::Shape;
 use crate::view::Viewbox;
 
-use skia_safe::{self as skia, IRect, Paint, RRect};
+use skia_safe::{self as skia, IRect, Paint, RRect, gpu::SyncCpu};
 
 use super::{gpu_state::GpuState, tiles::Tile, tiles::TileViewbox, tiles::TILE_SIZE};
 
@@ -464,18 +464,19 @@ impl Surfaces {
 
     pub fn flush_and_submit(&mut self, gpu_state: &mut GpuState, id: SurfaceId) {
         let surface = self.get_mut(id);
-        gpu_state.context.flush_and_submit_surface(surface, None);
+        // gpu_state.context.flush_and_submit_surface(surface, SyncCpu::Noe);
+        gpu_state.context.flush(None);
     }
 
     pub fn draw_into(&mut self, from: SurfaceId, to: SurfaceId, paint: Option<&skia::Paint>) {
-        let sampling_options = self.sampling_options;
+        // let sampling_options = self.sampling_options;
 
-        self.get_mut(from).clone().draw(
-            self.canvas_and_mark_dirty(to),
-            (0.0, 0.0),
-            sampling_options,
-            paint,
-        );
+        // self.get_mut(from).clone().draw(
+        //     self.canvas_and_mark_dirty(to),
+        //     (0.0, 0.0),
+        //     sampling_options,
+        //     paint,
+        // );
     }
 
     /// Draws the cache surface directly to the target canvas.

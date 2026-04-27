@@ -859,7 +859,7 @@ impl RenderState {
         // Only save canvas state if we have clipping or transforms
         // For simple shapes without clipping, skip expensive save/restore
         let needs_save =
-            clip_bounds.is_some() || offset.is_some() || !shape.transform.is_identity();
+            clip_bounds.is_some() || offset.is_some(); // || !shape.transform.is_identity();
 
         if needs_save {
             self.surfaces.apply_mut(surface_ids, |s| {
@@ -886,7 +886,7 @@ impl RenderState {
             && shape.blur.is_none()
             && !has_inherited_blur
             && shape.shadows.is_empty()
-            && shape.transform.is_identity()
+            // && shape.transform.is_identity()
             && matches!(
                 shape.shape_type,
                 Type::Rect(_) | Type::Circle | Type::Path(_) | Type::Bool(_)
@@ -911,27 +911,30 @@ impl RenderState {
                 canvas.translate(translation);
             });
 
-            fills::render(self, shape, &shape.fills, antialias, target_surface, None)?;
-
-            // Pass strokes in natural order; stroke merging handles top-most ordering internally.
-            let visible_strokes: Vec<&Stroke> = shape.visible_strokes().collect();
-            strokes::render(
-                self,
-                shape,
-                &visible_strokes,
-                Some(target_surface),
-                antialias,
-                outset,
-            )?;
+            // fills::render(self, shape, &shape.fills, antialias, target_surface, None)?;
+            let mut p = skia::Paint::default();
+            p.set_color(skia::Color::RED);            
+            self.surfaces.canvas(target_surface).draw_rect(shape.selrect(), &p);
+            
+            // // Pass strokes in natural order; stroke merging handles top-most ordering internally.
+            // let visible_strokes: Vec<&Stroke> = shape.visible_strokes().collect();
+            // strokes::render(
+            //     self,
+            //     shape,
+            //     &visible_strokes,
+            //     Some(target_surface),
+            //     antialias,
+            //     outset,
+            // )?;
 
             self.surfaces.apply_mut(target_surface as u32, |s| {
                 s.canvas().restore();
             });
 
-            if self.options.is_debug_visible() {
-                let shape_selrect_bounds = self.get_shape_selrect_bounds(shape);
-                debug::render_debug_shape(self, Some(shape_selrect_bounds), None);
-            }
+            // if self.options.is_debug_visible() {
+            //     let shape_selrect_bounds = self.get_shape_selrect_bounds(shape);
+            //     debug::render_debug_shape(self, Some(shape_selrect_bounds), None);
+            // }
 
             if needs_save {
                 self.surfaces.apply_mut(surface_ids, |s| {
@@ -1725,8 +1728,7 @@ impl RenderState {
 
         let _tile_start = performance::begin_timed_log!("tile_cache_update");
         performance::begin_measure!("tile_cache");
-        self.pending_tiles
-            .update(&self.tile_viewbox, &self.surfaces);
+        self.pending_tiles.update(&self.tile_viewbox, &self.surfaces);
         performance::end_measure!("tile_cache");
         performance::end_timed_log!("tile_cache_update", _tile_start);
 
@@ -2854,12 +2856,17 @@ impl RenderState {
             if let Some(current_tile) = self.current_tile {
                 if self.surfaces.has_cached_tile_surface(current_tile) {
                     performance::begin_measure!("render_shape_tree::cached");
+                    // During interactive transforms we already drew the atlas backdrop
+                    // to Target at the start of the frame. Cached tiles are therefore
+                    // already visible and re-blitting them costs extra GPU work.
                     let tile_rect = self.get_current_tile_bounds()?;
-                    self.surfaces.draw_cached_tile_surface(
-                        current_tile,
-                        tile_rect,
-                        self.background_color,
-                    );
+                    if !(self.options.is_interactive_transform() && self.surfaces.has_atlas()) {
+                        self.surfaces.draw_cached_tile_surface(
+                            current_tile,
+                            tile_rect,
+                            self.background_color,
+                        );
+                    }
 
                     // Also draw the cached tile to the Cache surface so
                     // render_from_cache (used during pan) has the full scene.
@@ -2898,7 +2905,16 @@ impl RenderState {
                     performance::end_measure!("render_shape_tree::uncached");
                     let tile_rect = self.get_current_tile_bounds()?;
                     if !is_empty {
-                        self.apply_render_to_final_canvas(tile_rect)?;
+                        if self.options.is_interactive_transform() {
+                            // During drag, avoid snapshot-based caching. Draw Current directly
+                            // into Target (and Cache) to reduce stalls.
+                            self.surfaces.draw_current_tile_direct(
+                                &tile_rect,
+                                self.background_color,
+                            );
+                        } else {
+                            self.apply_render_to_final_canvas(tile_rect)?;
+                        }
 
                         if self.options.is_debug_visible() {
                             debug::render_workspace_current_tile(
