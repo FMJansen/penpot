@@ -140,6 +140,18 @@ impl ShapesPoolImpl {
         Some(&mut self.shapes[idx])
     }
 
+    /// Get a shape by UUID without applying modifiers/structure/scale-content.
+    pub fn get_raw(&self, id: &Uuid) -> Option<&Shape> {
+        let idx = *self.uuid_to_idx.get(id)?;
+        Some(&self.shapes[idx])
+    }
+
+    /// Returns the current transform modifier matrix for the shape, if any.
+    pub fn get_modifier_matrix(&self, id: &Uuid) -> Option<&skia::Matrix> {
+        let idx = *self.uuid_to_idx.get(id)?;
+        self.modifiers.get(&idx)
+    }
+
     /// Get a shape by UUID. Returns the modified shape if modifiers/structure
     /// are applied, otherwise returns the base shape.
     pub fn get(&self, id: &Uuid) -> Option<&Shape> {
@@ -291,14 +303,10 @@ impl ShapesPoolImpl {
         let modified_uuids: Vec<Uuid> = if self.modifiers.is_empty() {
             Vec::new()
         } else {
-            let mut idx_to_uuid: HashMap<usize, Uuid> =
-                HashMap::with_capacity(self.uuid_to_idx.len());
-            for (uuid, idx) in self.uuid_to_idx.iter() {
-                idx_to_uuid.insert(*idx, *uuid);
-            }
-            self.modifiers
-                .keys()
-                .filter_map(|idx| idx_to_uuid.get(idx).copied())
+            // Prefer iterating uuid_to_idx to avoid allocating an idx->uuid map.
+            self.uuid_to_idx
+                .iter()
+                .filter_map(|(uuid, idx)| self.modifiers.contains_key(idx).then_some(*uuid))
                 .collect()
         };
 
@@ -317,13 +325,9 @@ impl ShapesPoolImpl {
         if self.modifiers.is_empty() {
             return Vec::new();
         }
-        let mut idx_to_uuid: HashMap<usize, Uuid> = HashMap::with_capacity(self.uuid_to_idx.len());
-        for (uuid, idx) in self.uuid_to_idx.iter() {
-            idx_to_uuid.insert(*idx, *uuid);
-        }
-        self.modifiers
-            .keys()
-            .filter_map(|idx| idx_to_uuid.get(idx).copied())
+        self.uuid_to_idx
+            .iter()
+            .filter_map(|(uuid, idx)| self.modifiers.contains_key(idx).then_some(*uuid))
             .collect()
     }
 
