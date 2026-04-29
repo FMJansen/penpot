@@ -12,6 +12,7 @@
 
 - Fix release notes modal appearing behind the dashboard sidebar (by @RenzoMXD) [Github #8296](https://github.com/penpot/penpot/issues/8296)
 - Fix incorrect handling of version restore operation [Github #9041](https://github.com/penpot/penpot/pull/9041)
+- Fix MCP integrations URL copy action to match the URL displayed in settings [Github #9238](https://github.com/penpot/penpot/issues/9238)
 
 
 ## 2.14.4
