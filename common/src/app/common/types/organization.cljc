@@ -16,6 +16,7 @@
    [:owner-id ::sm/uuid]
    [:avatar-bg-url ::sm/uri]
    [:logo-id {:optional true} [:maybe ::sm/uuid]]
+   [:expired-license {:optional true} [:maybe :boolean]]
    [:create-teams {:optional true} [:maybe [:enum "any" "onlyMe"]]]])
 
 
@@ -27,13 +28,14 @@
 
 (def organization->team-keys
   "Mapping from organization field keys to their corresponding :organization-* team keys."
-  [[:id            :organization-id]
-   [:name          :organization-name]
-   [:custom-photo  :organization-custom-photo]
-   [:slug          :organization-slug]
-   [:avatar-bg-url :organization-avatar-bg-url]
-   [:owner-id      :organization-owner-id]
-   [:create-teams  :organization-create-teams]])
+  [[:id               :organization-id]
+   [:name             :organization-name]
+   [:custom-photo     :organization-custom-photo]
+   [:slug             :organization-slug]
+   [:avatar-bg-url    :organization-avatar-bg-url]
+   [:owner-id         :organization-owner-id]
+   [:expired-license  :organization-expired-license]
+   [:create-teams     :organization-create-teams]])
 
 (defn apply-organization
   "Updates a team map with organization fields sourced from org.
