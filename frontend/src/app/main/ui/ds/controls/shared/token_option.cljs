@@ -12,6 +12,8 @@
    [app.common.data.macros :as dm]
    [app.main.ui.ds.foundations.assets.icon :refer [icon*] :as i]
    [app.main.ui.ds.tooltip.tooltip :refer [tooltip*]]
+   [app.util.i18n :as i18n :refer [tr]]
+   [cuerdas.core :as str]
    [rumext.v2 :as mf]))
 
 (def ^:private schema:token-option
@@ -25,12 +27,32 @@
    [:selected {:optional true} :boolean]
    [:focused {:optional true} :boolean]])
 
+(mf/defc resolved-value-tooltip*
+  [{:keys [token-name resolved-value]}]
+  [:*
+   [:span (dm/str (tr "workspace.tokens.token-name") ": ")]
+   [:span {:class (stl/css :token-name-tooltip)} token-name]
+   [:div
+    [:span (tr "inspect.tabs.styles.token-resolved-value")]
+    [:ul
+     (for [[k v] resolved-value]
+       [:li {:key (d/name k)}
+        [:span {:class (stl/css :resolved-key)} (str "- " (d/name k) ": ")]
+        [:span {:class (stl/css :resolved-value)}
+         (if (sequential? v)
+           (str/join ", " (map #(dm/str "\"" % "\"") v))
+           (dm/str v))]])]]])
+
 (mf/defc token-option*
   {::mf/schema schema:token-option}
   [{:keys [id name on-click selected ref focused resolved value] :rest props}]
   (let [internal-id (mf/use-id)
         id          (d/nilv id internal-id)
-        element-ref (mf/use-ref nil)]
+        element-ref (mf/use-ref nil)
+        tooltip-content (if (map? resolved)
+                          (mf/html [:> resolved-value-tooltip* {:token-name name
+                                                                :resolved-value resolved}])
+                          name)]
     [:li {:value id
           :class (stl/css-case :token-option true
                                :option-with-pill true
@@ -52,7 +74,7 @@
          :class (stl/css :option-check)
          :aria-hidden (when name true)}]
        [:span {:class (stl/css :icon-placeholder)}])
-     [:> tooltip* {:content name
+     [:> tooltip* {:content tooltip-content
                    :trigger-ref element-ref
                    :id (dm/str id "-name")
                    :class (stl/css :option-text)}
