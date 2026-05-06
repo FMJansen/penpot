@@ -7,6 +7,7 @@
 (ns app.plugins.api
   "RPC for plugins runtime."
   (:require
+   [app.main.data.workspace.texts :as dwt]
    [app.common.data :as d]
    [app.common.data.macros :as dm]
    [app.common.files.changes-builder :as cb]
@@ -698,8 +699,15 @@
                       (rx/take 1))
                  (rx/empty))
 
+               (if @dwt/font-pending
+                 (->> st/stream
+                      (rx/filter (ptk/type? ::dwt/commit-position-data))
+                      (rx/take 1))
+                 (rx/empty))
+
                (if (and (not @dwwt/resize-pending)
-                        (not @dwsl/layout-pending))
+                        (not @dwsl/layout-pending)
+                        (not @dwt/font-pending))
                  (rx/of :ok)
                  (rx/empty)))
               (rx/take 1)

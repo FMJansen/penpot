@@ -15,6 +15,8 @@
    [cuerdas.core :as str]
    [promesa.core :as p]))
 
+
+
 (defn parse-text-nodes
   "Given a text node retrieves the rectangles for everyone of its paragraphs and its text."
   [parent-node direction text-node text-align]
