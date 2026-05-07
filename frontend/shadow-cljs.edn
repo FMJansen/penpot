@@ -71,7 +71,10 @@
    :release
    {:closure-defines {goog.DEBUG false
                       goog.debug.LOGGING_ENABLED true
-                      app.config/compiled-version-tag #shadow/env ["VERSION_TAG" :default "develop"]}
+                      app.config/compiled-version-tag #shadow/env ["VERSION_TAG" :default "develop"]
+                      ;; Uncomment when using goog-define for saas? (prod builds only)
+                      ;; app.config/saas? #shadow/env ["PENPOT_SAAS" :as :bool :default false]
+                      }
     :compiler-options
     {:fn-invoke-direct true
      :optimizations #shadow/env ["PENPOT_BUILD_OPTIMIZATIONS" :as :keyword :default :advanced]

@@ -156,6 +156,16 @@
         (ts/asap #(.reload ^js location true))
         true))))
 
+;; --- SaaS / selfhost flag
+;;
+;; DEV: use this plain def to toggle locally (true = SaaS, false = selfhost).
+(def saas? false)
+;;
+;; PROD: comment the def above and uncomment the goog-define below.
+;; The value is baked into the JS bundle at build time via PENPOT_SAAS env var.
+;; Intentionally undocumented — only set in Penpot's internal SaaS build pipeline.
+;; (goog-define saas? false)
+
 (def terms-of-service-uri (obj/get global "penpotTermsOfServiceURI"))
 (def oidc-name            (obj/get global "penpotOIDCName"))
 (def privacy-policy-uri   (obj/get global "penpotPrivacyPolicyURI"))
