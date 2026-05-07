@@ -1,5 +1,6 @@
 # CHANGELOG
 
+
 ## 2.15.0 (Unreleased)
 
 ### :sparkles: New features & Enhancements
@@ -10,7 +11,16 @@
 
 ### :bug: Bugs fixed
 
+- Fix incorrect invitation token handling on register process [Github #9380](https://github.com/penpot/penpot/pull/9380)
 - Fix incorrect handling of version restore operation [Github #9041](https://github.com/penpot/penpot/pull/9041)
+- Fix false “text editing” warning when applying tokens [Github #6346](https://github.com/penpot/penpot/issues/9346)
+
+
+## 2.14.5
+
+### :bug: Bugs fixed
+
+- Fix incorrect invitation token handling on register process [Github #9380](https://github.com/penpot/penpot/pull/9380)
 
 
 ## 2.14.4
