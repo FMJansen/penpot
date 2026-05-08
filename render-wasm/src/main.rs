@@ -25,7 +25,6 @@ use globals::{get_design_state, get_gpu_state, get_render_state};
 use macros::wasm_error;
 use math::{Bounds, Matrix};
 use mem::SerializableResult;
-use render::{gpu_state::GpuState, RenderState};
 use shapes::{StructureEntry, StructureEntryType, TransformEntry};
 use skia_safe as skia;
 use utils::uuid_from_u32_quartet;
