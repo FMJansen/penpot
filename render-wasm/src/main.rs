@@ -1,6 +1,7 @@
 #[cfg(target_arch = "wasm32")]
 mod emscripten;
 mod error;
+mod globals;
 mod math;
 mod mem;
 mod performance;
@@ -18,151 +19,17 @@ use std::collections::HashMap;
 
 #[allow(unused_imports)]
 use crate::error::{Error, Result};
-use crate::state::TextEditorState;
+
+use globals::{get_design_state, get_gpu_state, get_render_state};
+
 use macros::wasm_error;
 use math::{Bounds, Matrix};
 use mem::SerializableResult;
 use render::{gpu_state::GpuState, RenderState};
 use shapes::{StructureEntry, StructureEntryType, TransformEntry};
 use skia_safe as skia;
-use state::State;
 use utils::uuid_from_u32_quartet;
 use uuid::Uuid;
-
-pub(crate) static mut STATE: Option<Box<State>> = None;
-pub(crate) static mut TEXT_EDITOR_STATE: *mut TextEditorState = std::ptr::null_mut();
-
-#[inline(always)]
-pub fn get_text_editor_state() -> &'static mut TextEditorState {
-    unsafe {
-        debug_assert!(!TEXT_EDITOR_STATE.is_null(), "Text Editor state is null");
-        &mut *TEXT_EDITOR_STATE
-    }
-}
-
-/// GPU State.
-static mut GPU_STATE: *mut GpuState = std::ptr::null_mut();
-
-#[inline(always)]
-pub(crate) fn get_gpu_state() -> &'static mut GpuState {
-    unsafe {
-        debug_assert!(!GPU_STATE.is_null(), "GPU State is null");
-        &mut *GPU_STATE
-    }
-}
-
-/// Render State.
-static mut RENDER_STATE: *mut RenderState = std::ptr::null_mut();
-
-#[inline(always)]
-pub(crate) fn get_render_state() -> &'static mut RenderState {
-    unsafe {
-        debug_assert!(!RENDER_STATE.is_null(), "Render State is null");
-        &mut *RENDER_STATE
-    }
-}
-
-// FIXME: These with_state* macros should be using our CriticalError instead of expect.
-// But to do that, we need to not use them at domain-level (i.e. in business logic), just
-// in the context of the wasm call.
-#[macro_export]
-macro_rules! with_state_mut {
-    ($state:ident, $block:block) => {{
-        let $state = unsafe {
-            #[allow(static_mut_refs)]
-            STATE.as_mut()
-        }
-        .expect("Got an invalid state pointer");
-        $block
-    }};
-}
-
-#[macro_export]
-macro_rules! with_state {
-    ($state:ident, $block:block) => {{
-        let $state = unsafe {
-            #[allow(static_mut_refs)]
-            STATE.as_ref()
-        }
-        .expect("Got an invalid state pointer");
-        $block
-    }};
-}
-
-#[macro_export]
-macro_rules! with_current_shape_mut {
-    ($state:ident, |$shape:ident: &mut Shape| $block:block) => {
-        let $state = unsafe {
-            #[allow(static_mut_refs)]
-            STATE.as_mut()
-        }
-        .expect("Got an invalid state pointer");
-
-        $state.touch_current();
-
-        if let Some($shape) = $state.current_shape_mut() {
-            $block
-        }
-    };
-}
-
-#[macro_export]
-macro_rules! with_current_shape {
-    ($state:ident, |$shape:ident: &Shape| $block:block) => {
-        let $state = unsafe {
-            #[allow(static_mut_refs)]
-            STATE.as_ref()
-        }
-        .expect("Got an invalid state pointer");
-        if let Some($shape) = $state.current_shape() {
-            $block
-        }
-    };
-}
-
-#[macro_export]
-macro_rules! with_state_mut_current_shape {
-    ($state:ident, |$shape:ident: &Shape| $block:block) => {
-        let $state = unsafe {
-            #[allow(static_mut_refs)]
-            STATE.as_mut()
-        }
-        .expect("Got an invalid state pointer");
-        if let Some($shape) = $state.current_shape() {
-            $block
-        }
-    };
-}
-
-/// Initializes GPU.
-fn gpu_init() {
-    unsafe {
-        let gpu_state = GpuState::try_new().expect("Cannot initialize GPU State");
-        GPU_STATE = Box::into_raw(Box::new(gpu_state));
-    }
-}
-
-/// Initializes RenderState.
-fn render_init(width: i32, height: i32) {
-    unsafe {
-        let render_state =
-            RenderState::try_new(width, height).expect("Cannot intialize RenderState");
-        RENDER_STATE = Box::into_raw(Box::new(render_state));
-    }
-}
-
-#[no_mangle]
-#[wasm_error]
-pub extern "C" fn init(width: i32, height: i32) -> Result<()> {
-    gpu_init();
-    render_init(width, height);
-    unsafe {
-        let state_box = Box::new(State::new());
-        STATE = Some(state_box);
-        TEXT_EDITOR_STATE = Box::into_raw(Box::new(TextEditorState::new()));
-    }
-    Ok(())
-}
 
 #[no_mangle]
 #[wasm_error]
@@ -170,18 +37,6 @@ pub extern "C" fn set_browser(browser: u8) -> Result<()> {
     with_state_mut!(state, {
         state.set_browser(browser);
     });
-    Ok(())
-}
-
-#[no_mangle]
-#[wasm_error]
-pub extern "C" fn clean_up() -> Result<()> {
-    // Cancel the current animation frame if it exists so
-    // it won't try to render without context
-    let render_state = get_render_state();
-    render_state.cancel_animation_frame();
-    unsafe { STATE = None }
-    mem::free_bytes()?;
     Ok(())
 }
 
@@ -1013,28 +868,14 @@ pub extern "C" fn set_modifiers() -> Result<()> {
 #[no_mangle]
 #[wasm_error]
 pub extern "C" fn start_temp_objects() -> Result<()> {
-    unsafe {
-        #[allow(static_mut_refs)]
-        let mut state = STATE.take().ok_or(Error::CriticalError(
-            "Got an invalid state pointer".to_string(),
-        ))?;
-        state = Box::new(state.start_temp_objects()?);
-        STATE = Some(state);
-    }
+    get_design_state().start_temp_objects()?;
     Ok(())
 }
 
 #[no_mangle]
 #[wasm_error]
 pub extern "C" fn end_temp_objects() -> Result<()> {
-    unsafe {
-        #[allow(static_mut_refs)]
-        let mut state = STATE.take().ok_or(Error::CriticalError(
-            "Got an invalid state pointer".to_string(),
-        ))?;
-        state = Box::new(state.end_temp_objects()?);
-        STATE = Some(state);
-    }
+    get_design_state().end_temp_objects()?;
     Ok(())
 }
 

@@ -3,7 +3,6 @@ use crate::skia::textlayout::FontCollection;
 use crate::skia::Image;
 use crate::uuid::Uuid;
 use crate::with_state_mut;
-use crate::STATE;
 use std::collections::HashSet;
 
 pub fn uuid_from_u32_quartet(a: u32, b: u32, c: u32, d: u32) -> Uuid {

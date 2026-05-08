@@ -4,7 +4,7 @@ use crate::utils::uuid_from_u32_quartet;
 use crate::uuid::Uuid;
 use crate::wasm::blend::RawBlendMode;
 use crate::wasm::layouts::constraints::{RawConstraintH, RawConstraintV};
-use crate::{with_state_mut, STATE};
+use crate::with_state_mut;
 
 #[allow(unused_imports)]
 use crate::error::{Error, Result};

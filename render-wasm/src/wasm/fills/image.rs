@@ -5,7 +5,6 @@ use crate::shapes::Fill;
 use crate::state::State;
 use crate::uuid::Uuid;
 use crate::with_state_mut;
-use crate::STATE;
 use crate::{shapes::ImageFill, utils::uuid_from_u32_quartet};
 use macros::wasm_error;
 

@@ -7,7 +7,7 @@ use crate::shapes::{
     self, GrowType, Shape, TextAlign, TextDecoration, TextDirection, TextTransform, Type,
 };
 use crate::utils::{uuid_from_u32, uuid_from_u32_quartet};
-use crate::{with_current_shape, with_current_shape_mut, with_state, with_state_mut, STATE};
+use crate::{with_current_shape, with_current_shape_mut, with_state, with_state_mut};
 
 use crate::error::Error;
 
