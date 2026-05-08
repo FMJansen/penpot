@@ -209,3 +209,14 @@
                      :cause cause)))
 
         (rph/wrap nil)))))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; GET-ENABLED-FLAGS
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(sv/defmethod ::get-enabled-flags
+  {::audit/skip true
+   ::doc/skip true
+   ::doc/added "1.20"}
+  [_cfg _params]
+  cf/flags)
