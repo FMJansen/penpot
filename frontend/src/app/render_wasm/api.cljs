@@ -1112,14 +1112,8 @@
               (when (and @view-interaction-active?
                          (not @explicit-view-gesture-active?))
                 (view-interaction-end!))
-              ;; Use async _render: visible tiles render synchronously
-              ;; (no yield), interest-area tiles render progressively
-              ;; via rAF.  _set_view_end already rebuilt the tile
-              ;; index.  For pan, most tiles are cached so the render
-              ;; completes in the first frame.  For zoom, interest-
-              ;; area tiles (~3 tile margin) don't block the main
-              ;; thread.
-              (h/call wasm/internal-module "_render" 0)))]
+              ;; Keep the full-quality render on the normal rAF path.
+              (request-render "render-finish")))]
     (fns/debounce do-render DEBOUNCE_DELAY_MS)))
 
 (defn view-interaction-start!
@@ -1133,8 +1127,9 @@
   (when @view-interaction-active?
     (h/call wasm/internal-module "_set_view_end")
     (reset! view-interaction-active? false)
-    ;; Kick off the async full render for the new view.
-    (h/call wasm/internal-module "_render" 0)))
+    ;; Schedule full-quality render via rAF to avoid blocking the thread/GPU
+    ;; right at gesture end (some browsers, notably Firefox, are sensitive here).
+    (request-render "view-interaction-end")))
 
 (defn view-gesture-start!
   "Marks the beginning of an explicit pointer-driven view gesture (pan/zoom-drag)."
