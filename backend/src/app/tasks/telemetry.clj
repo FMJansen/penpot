@@ -145,7 +145,7 @@
 (def ^:private sql:get-counters
   "SELECT name, count(*) AS count
      FROM audit_log
-    WHERE source IN ('backend', 'frontend', 'telemetry')
+    WHERE source IN ('backend', 'frontend', 'telemetry:backend', 'telemetry:frontend')
       AND created_at >= date_trunc('day', now())
       AND created_at <  date_trunc('day', now()) + interval '1 day'
     GROUP BY 1
@@ -188,7 +188,7 @@
                  :uri (cf/get :telemetry-uri)
                  :headers {"content-type" "application/json"}
                  :body (json/encode-str data)}
-        response (http/req cfg request)]
+        response (http/req cfg request {:skip-ssrf-check? true})]
     (when (> (:status response) 206)
       (ex/raise :type :internal
                 :code :invalid-response
@@ -212,39 +212,28 @@
 ;; AUDIT-EVENT BATCH (TELEMETRY MODE)
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
-;; Maximum number of telemetry-mode audit rows allowed to accumulate in
-;; the audit_log table. When this limit is exceeded the oldest rows are
-;; deleted before collection (we accept losing events rather than
-;; letting the table grow unboundedly).
+;; Telemetry events older than this are purged by the GC step so the
+;; buffer stays bounded.
 (def ^:private batch-size 10000)
-(def ^:private max-telemetry-events 100000)
-
-(def ^:private sql:count-telemetry-events
-  "SELECT count(*) AS cnt FROM audit_log WHERE source = 'telemetry'")
 
 (def ^:private sql:gc-events
   "DELETE FROM audit_log
-    WHERE id IN (
-      SELECT id FROM audit_log
-       WHERE source = 'telemetry'
-       ORDER BY created_at ASC
-       LIMIT ?)")
+    WHERE source IN ('telemetry:backend', 'telemetry:frontend')
+      AND created_at < now() - interval '7 days'")
 
 (defn- gc-events
-  "Delete the oldest telemetry-mode events when the table exceeds the
-  configured cap so that the buffer stays bounded."
+  "Delete telemetry-mode events older than `telemetry-retention-days`
+  so that the buffer stays bounded."
   [{:keys [::db/conn]}]
-  (let [cnt (-> (db/exec-one! conn [sql:count-telemetry-events]) :cnt long)
-        excess (- cnt max-telemetry-events)]
-    (when (pos? excess)
-      (l/warn :hint "telemetry audit_log cap exceeded; dropping oldest events"
-              :count excess)
-      (db/exec-one! conn [sql:gc-events (int excess)]))))
+  (let [result (db/exec-one! conn [sql:gc-events])]
+    (when (pos? (:next.jdbc/update-count result))
+      (l/warn :hint "purged stale telemetry events"
+              :count (:next.jdbc/update-count result)))))
 
 (def ^:private sql:fetch-telemetry-events
   "SELECT id, name, type, source, tracked_at, profile_id, context
      FROM audit_log
-    WHERE source = 'telemetry'
+    WHERE source IN ('telemetry:backend', 'telemetry:frontend')
     ORDER BY created_at ASC
     LIMIT ?")
 
@@ -276,7 +265,7 @@
                  :uri     (cf/get :telemetry-uri)
                  :headers {"content-type" "application/json"}
                  :body    (json/encode-str payload)}
-        resp    (http/req cfg request)]
+        resp    (http/req cfg request {:skip-ssrf-check? true})]
     (if (<= (:status resp) 206)
       true
       (do

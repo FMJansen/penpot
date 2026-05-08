@@ -15,7 +15,7 @@
    [app.config :as cf]
    [app.db :as db]
    [app.http :as-alias http]
-   [app.loggers.audit :as-alias audit]
+   [app.loggers.audit :as audit]
    [app.loggers.database :as loggers.db]
    [app.loggers.mattermost :as loggers.mm]
    [app.rpc :as-alias rpc]
@@ -124,16 +124,17 @@
   (comp
    (map adjust-timestamp)
    (map (fn [event]
-          (let [tday (ct/truncate (::audit/created-at event) :days)]
+          (let [tday       (ct/truncate (::audit/created-at event) :days)
+                safe-props (audit/filter-safe-props (::audit/props event {}))]
             [(::audit/id event)
              (::audit/name event)
-             "telemetry"
+             "telemetry:frontend"
              (::audit/type event)
              tday
              tday
              (::audit/profile-id event)
              (db/inet "0.0.0.0")
-             (db/tjson {})
+             (db/tjson safe-props)
              (db/tjson (filter-safe-context (::audit/context event {})))])))))
 
 (defn- handle-events

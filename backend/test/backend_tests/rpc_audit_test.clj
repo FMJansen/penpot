@@ -137,13 +137,13 @@
       (let [[row :as rows] (->> (th/db-exec! ["select * from audit_log"])
                                 (mapv decode-row))]
         (t/is (= 1 (count rows)))
-        ;; source is telemetry, not frontend
-        (t/is (= "telemetry" (:source row)))
+        ;; source is telemetry:frontend, not frontend
+        (t/is (= "telemetry:frontend" (:source row)))
         ;; profile-id preserved
         (t/is (= (:id prof) (:profile-id row)))
         ;; event name preserved
         (t/is (= "navigate" (:name row)))
-        ;; props stripped to empty
+        ;; props only contain UUID-valued keys (non-UUID stripped)
         (t/is (= {} (:props row)))
         ;; ip zeroed
         (t/is (= "0.0.0.0" (str (:ip-addr row))))

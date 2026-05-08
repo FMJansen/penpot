@@ -238,6 +238,16 @@
       (some? tnow)
       (assoc :tracked-at tnow))))
 
+(def ^:private xf:filter-safe-props
+  "Transducer that keeps only map entries whose values are UUIDs."
+  (filter (fn [[_ v]] (uuid? v))))
+
+(defn filter-safe-props
+  "Return only UUID-valued keys from a props map.  This preserves
+  object relations while maintaining anonymity."
+  [props]
+  (into {} xf:filter-safe-props props))
+
 (defn- append-audit-entry
   [cfg params]
   (let [params (-> params
@@ -287,9 +297,10 @@
                                              :version
                                              :client-version
                                              :client-user-agent]))
+              safe-props   (filter-safe-props (:props params {}))
               params (-> params
-                         (assoc :source "telemetry")
-                         (assoc :props {})
+                         (assoc :source "telemetry:backend")
+                         (assoc :props safe-props)
                          (assoc :context safe-context)
                          (assoc :ip-addr (db/inet "0.0.0.0"))
                          (assoc :created-at tday)
