@@ -17,6 +17,7 @@
    [app.main.data.event :as ev]
    [app.main.data.helpers :as dsh]
    [app.main.streams :as ms]
+   [app.render-wasm.api :as wasm.api]
    [app.util.mouse :as mse]
    [beicon.v2.core :as rx]
    [potok.v2.core :as ptk]))
@@ -157,6 +158,7 @@
       (let [stopper (->> stream (rx/filter (ptk/type? ::finish-zooming)))]
         (when-not (get-in state [:workspace-local :zooming])
           (rx/concat
+           (rx/of (fn [s] (wasm.api/view-gesture-start!) s))
            (rx/of #(-> % (assoc-in [:workspace-local :zooming] true)))
            (->> stream
                 (rx/filter mse/pointer-event?)
@@ -172,4 +174,7 @@
     ptk/UpdateEvent
     (update [_ state]
       (-> state
-          (update :workspace-local dissoc :zooming)))))
+          (update :workspace-local dissoc :zooming)))
+    ptk/EffectEvent
+    (effect [_ _ _]
+      (wasm.api/view-gesture-end!))))

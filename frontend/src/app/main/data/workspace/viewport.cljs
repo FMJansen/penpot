@@ -16,6 +16,7 @@
    [app.common.math :as mth]
    [app.main.data.event :as ev]
    [app.main.data.helpers :as dsh]
+   [app.render-wasm.api :as wasm.api]
    [app.util.mouse :as mse]
    [beicon.v2.core :as rx]
    [potok.v2.core :as ptk]))
@@ -174,6 +175,7 @@
             zoom (get-in state [:workspace-local :zoom])]
         (when-not (get-in state [:workspace-local :panning])
           (rx/concat
+           (rx/of (fn [s] (wasm.api/view-gesture-start!) s))
            (rx/of #(-> % (assoc-in [:workspace-local :panning] true)))
            (->> stream
                 (rx/filter mse/pointer-event?)
@@ -191,4 +193,7 @@
     ptk/UpdateEvent
     (update [_ state]
       (-> state
-          (update :workspace-local dissoc :panning)))))
+          (update :workspace-local dissoc :panning)))
+    ptk/EffectEvent
+    (effect [_ _ _]
+      (wasm.api/view-gesture-end!))))

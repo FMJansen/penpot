@@ -183,6 +183,15 @@
 
 (def ^:const DEBOUNCE_DELAY_MS 100)
 
+;; Tracks whether we have an open view interaction in WASM (fast_mode=true).
+;; This prevents calling `_set_view_start` on every vbox/zoom change.
+(defonce ^:private view-interaction-active? (atom false))
+
+;; True while we are inside an explicit pointer-driven gesture (pan/zoom-drag).
+;; Some browsers (notably Firefox) can deliver viewport updates in bursts with
+;; gaps; we must not treat such gaps as "gesture ended".
+(defonce ^:private explicit-view-gesture-active? (atom false))
+
 ;; Time budget (ms) per chunk of shape processing before yielding to browser
 (def ^:private ^:const CHUNK_TIME_BUDGET_MS 8)
 ;; Threshold below which we use synchronous processing (no chunking overhead)
@@ -1097,8 +1106,12 @@
             ;; to prevent errors when navigating quickly
             (when (and wasm/context-initialized? (not @wasm/context-lost?))
               (perf/begin-measure "render-finish")
-              (h/call wasm/internal-module "_set_view_end")
               (perf/end-measure "render-finish")
+              ;; If we're NOT inside an explicit gesture, end the interaction
+              ;; (this is the "wheel / inertial scroll" case).
+              (when (and @view-interaction-active?
+                         (not @explicit-view-gesture-active?))
+                (view-interaction-end!))
               ;; Use async _render: visible tiles render synchronously
               ;; (no yield), interest-area tiles render progressively
               ;; via rAF.  _set_view_end already rebuilt the tile
@@ -1109,10 +1122,38 @@
               (h/call wasm/internal-module "_render" 0)))]
     (fns/debounce do-render DEBOUNCE_DELAY_MS)))
 
+(defn view-interaction-start!
+  []
+  (when-not @view-interaction-active?
+    (h/call wasm/internal-module "_set_view_start")
+    (reset! view-interaction-active? true)))
+
+(defn view-interaction-end!
+  []
+  (when @view-interaction-active?
+    (h/call wasm/internal-module "_set_view_end")
+    (reset! view-interaction-active? false)
+    ;; Kick off the async full render for the new view.
+    (h/call wasm/internal-module "_render" 0)))
+
+(defn view-gesture-start!
+  "Marks the beginning of an explicit pointer-driven view gesture (pan/zoom-drag)."
+  []
+  (reset! explicit-view-gesture-active? true)
+  (view-interaction-start!))
+
+(defn view-gesture-end!
+  "Marks the end of an explicit pointer-driven view gesture (pan/zoom-drag)."
+  []
+  (reset! explicit-view-gesture-active? false)
+  (view-interaction-end!))
+
 (defn set-view-box
   [zoom vbox]
   (perf/begin-measure "set-view-box")
-  (h/call wasm/internal-module "_set_view_start")
+  ;; Open a view interaction for any viewport change (wheel/inertia included).
+  ;; This is idempotent and cheap when already active.
+  (view-interaction-start!)
   (h/call wasm/internal-module "_set_view" zoom (- (:x vbox)) (- (:y vbox)))
   (perf/end-measure "set-view-box")
 
@@ -1289,6 +1330,7 @@
                      ;; Rebuild the tile index so _render knows which shapes
                      ;; map to which tiles after a page switch.
                      (h/call wasm/internal-module "_set_view_end")
+                     (reset! view-interaction-active? false)
 
                      ;; Text layouts must run after _end_loading (they
                      ;; depend on state that is only correct when loading
@@ -1347,6 +1389,7 @@
     ;; Rebuild the tile index so _render knows which shapes
     ;; map to which tiles after a page switch.
     (h/call wasm/internal-module "_set_view_end")
+    (reset! view-interaction-active? false)
     (process-pending shapes thumbnails full
                      (fn []
                        (if render-callback
