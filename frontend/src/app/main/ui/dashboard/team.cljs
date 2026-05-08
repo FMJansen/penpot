@@ -1377,6 +1377,14 @@
                                  (filter :organization)
                                  (map dtm/team->organization)))
 
+        current-organization-id (dm/get-in team [:organization :id])
+
+        can-change-organization? (mf/with-memo [all-organizations current-organization-id]
+                                   (->> all-organizations
+                                        (remove #(= (:id %) current-organization-id))
+                                        seq
+                                        some?))
+
         ;; Filter to orgs where user is allowed to create/add teams
         organizations (mf/with-memo [all-organizations profile-id]
                         (->> all-organizations
@@ -1384,9 +1392,6 @@
                                        (let [perm      (get-in org [:permissions :create-teams])
                                              is-owner? (= profile-id (:owner-id org))]
                                          (or (= perm "any") is-owner?))))))
-
-        can-change-organization? (mf/with-memo [organizations]
-                                   (> (count organizations) 1))
 
         can-add-to-organization? (mf/with-memo [organizations all-organizations]
                                    (and (pos? (count all-organizations))

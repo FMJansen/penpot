@@ -227,11 +227,14 @@
               (fn [teams]
                 (let [all-orgs (map dt/team->organization
                                     (filter #(and (:is-default %) (:organization %)) teams))
-                      orgs     (filter (fn [org]
-                                         (let [perm    (get-in org [:permissions :create-teams])
-                                               is-own? (= profile-id (:owner-id org))]
-                                           (or (= perm "any") is-own?))) all-orgs)
                       team     (first (filter #(= (:id %) team-id) teams))
+                      current-organization-id (dm/get-in team [:organization :id])
+                      orgs     (->> all-orgs
+                                    (filter (fn [org]
+                                              (let [perm    (dm/get-in org [:permissions :create-teams])
+                                                    is-own? (= profile-id (:owner-id org))]
+                                                (or (= perm "any") is-own?))))
+                                    (remove #(= (:id %) current-organization-id)))
                       on-confirm (fn [organization-id]
                                    (st/emit! (add-team-to-org {:team-id team-id
                                                                :organization-id organization-id})))]
